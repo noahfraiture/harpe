@@ -3,7 +3,8 @@
 ## Backend
 
 - Add a real LLM provider adapter for chat streaming, embeddings, summarization, and extraction.
-- Add token budgeting and model-aware context sizing.
+- Replace the first-pass token estimator with model/provider-specific tokenization.
+- Add model-aware context sizing presets.
 - Move memory extraction, summary updates, and embeddings to background jobs with retries.
 - Replace the early schemaless SurrealDB setup with versioned migrations.
 - Add DB-side vector indexes, full-text indexes, and graph relation tables.
@@ -17,4 +18,3 @@
 - Add mocked HTTP tests for the future real LLM provider.
 - Add failure-path tests for LLM, database, and streaming errors.
 - Add persistent-SurrealDB migration tests outside the in-memory engine.
-
