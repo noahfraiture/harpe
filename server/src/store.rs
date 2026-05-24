@@ -2,8 +2,9 @@ use async_trait::async_trait;
 
 use crate::Result;
 use crate::domain::{
-    Character, Game, MemoryHit, Message, NewGame, NewMemoryChunk, NewMessage, NewSession, Session,
-    StorySummary, UpsertCharacter, UpsertStorySummary,
+    Character, Event, Game, Location, MemoryHit, Message, NewEvent, NewGame, NewMemoryChunk,
+    NewMessage, NewSession, Session, StorySummary, UpsertCharacter, UpsertLocation,
+    UpsertStorySummary, UpsertWorldFact, WorldFact,
 };
 
 #[async_trait]
@@ -24,6 +25,15 @@ pub trait HarpeStore: Send + Sync {
     async fn upsert_character(&self, input: UpsertCharacter) -> Result<Character>;
     async fn list_characters(&self, game_id: &str) -> Result<Vec<Character>>;
     async fn get_character(&self, character_id: &str) -> Result<Character>;
+
+    async fn save_event(&self, input: NewEvent) -> Result<Event>;
+    async fn list_events(&self, session_id: &str, limit: usize) -> Result<Vec<Event>>;
+
+    async fn upsert_location(&self, input: UpsertLocation) -> Result<Location>;
+    async fn list_locations(&self, game_id: &str) -> Result<Vec<Location>>;
+
+    async fn upsert_world_fact(&self, input: UpsertWorldFact) -> Result<WorldFact>;
+    async fn list_world_facts(&self, game_id: &str, limit: usize) -> Result<Vec<WorldFact>>;
 
     async fn save_memory_chunk(&self, input: NewMemoryChunk) -> Result<MemoryHit>;
     async fn search_memory(

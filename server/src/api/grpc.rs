@@ -6,16 +6,18 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
 use crate::domain::{
-    Character, Game, MemoryHit, Message, MessageRole, NewGame, NewMemoryChunk, NewMessage,
-    NewSession, Session, StorySummary, UpsertStorySummary, new_id,
+    Character, Event, Game, Location, MemoryExtraction, MemoryHit, Message, MessageRole, NewEvent,
+    NewGame, NewMemoryChunk, NewMessage, NewSession, Session, StorySummary, UpsertCharacter,
+    UpsertLocation, UpsertStorySummary, UpsertWorldFact, WorldFact, new_id,
 };
 use crate::engine::{ContextBuilder, ContextInputs};
-use crate::llm::{LlmClient, SummarizeRequest};
+use crate::llm::{ExtractMemoryRequest, LlmClient, SummarizeRequest};
 use crate::pb::{
     self, CreateGameRequest, CreateSessionRequest, GetCharacterRequest, GetGameRequest,
-    GetSessionRequest, GetStorySummaryRequest, ListCharactersRequest, ListGamesRequest,
-    ListMessagesRequest, MessageDelta, SearchMemoryRequest, SendMessageRequest,
-    game_service_server, memory_service_server, session_service_server,
+    GetSessionRequest, GetStorySummaryRequest, ListCharactersRequest, ListEventsRequest,
+    ListGamesRequest, ListLocationsRequest, ListMessagesRequest, ListWorldFactsRequest,
+    MessageDelta, SearchMemoryRequest, SendMessageRequest, game_service_server,
+    memory_service_server, session_service_server,
 };
 use crate::store::HarpeStore;
 use crate::{HarpeError, Result};
@@ -210,6 +212,56 @@ impl memory_service_server::MemoryService for HarpeGrpc {
         Ok(Response::new(character_to_pb(character)))
     }
 
+    async fn list_events(
+        &self,
+        request: Request<ListEventsRequest>,
+    ) -> std::result::Result<Response<pb::ListEventsResponse>, Status> {
+        let request = request.into_inner();
+        let events = self
+            .store
+            .list_events(&request.session_id, limit_from_u32(request.limit))
+            .await
+            .map_err(status_from_error)?
+            .into_iter()
+            .map(event_to_pb)
+            .collect();
+
+        Ok(Response::new(pb::ListEventsResponse { events }))
+    }
+
+    async fn list_world_facts(
+        &self,
+        request: Request<ListWorldFactsRequest>,
+    ) -> std::result::Result<Response<pb::ListWorldFactsResponse>, Status> {
+        let request = request.into_inner();
+        let facts = self
+            .store
+            .list_world_facts(&request.game_id, limit_from_u32(request.limit))
+            .await
+            .map_err(status_from_error)?
+            .into_iter()
+            .map(world_fact_to_pb)
+            .collect();
+
+        Ok(Response::new(pb::ListWorldFactsResponse { facts }))
+    }
+
+    async fn list_locations(
+        &self,
+        request: Request<ListLocationsRequest>,
+    ) -> std::result::Result<Response<pb::ListLocationsResponse>, Status> {
+        let locations = self
+            .store
+            .list_locations(&request.into_inner().game_id)
+            .await
+            .map_err(status_from_error)?
+            .into_iter()
+            .map(location_to_pb)
+            .collect();
+
+        Ok(Response::new(pb::ListLocationsResponse { locations }))
+    }
+
     async fn search_memory(
         &self,
         request: Request<SearchMemoryRequest>,
@@ -265,6 +317,7 @@ async fn run_send_message(
 
     let query_embedding = llm.embed(&request.content).await?;
     let summary = store.get_story_summary(&session.id).await?;
+    let recent_events = store.list_events(&session.id, 12).await?;
     let memories = store
         .search_memory(
             &session.id,
@@ -274,14 +327,19 @@ async fn run_send_message(
         )
         .await?;
     let characters = store.list_characters(&game.id).await?;
+    let world_facts = store.list_world_facts(&game.id, 24).await?;
+    let locations = store.list_locations(&game.id).await?;
     let recent_messages = store
         .list_recent_messages(&session.id, context_builder.recent_message_limit)
         .await?;
     let chat_request = context_builder.build(ContextInputs {
         base_system_prompt: game.system_prompt,
         summary: summary.clone(),
+        recent_events,
         memories,
         characters,
+        world_facts,
+        locations,
         recent_messages,
     });
 
@@ -320,7 +378,14 @@ async fn run_send_message(
         })
         .await?;
 
-    update_memory_after_turn(&session, &assistant_content, store.as_ref(), llm.as_ref()).await?;
+    update_memory_after_turn(
+        &session,
+        &game.id,
+        &assistant_content,
+        store.as_ref(),
+        llm.as_ref(),
+    )
+    .await?;
 
     let _ = tx
         .send(Ok(MessageDelta {
@@ -336,6 +401,7 @@ async fn run_send_message(
 
 async fn update_memory_after_turn(
     session: &Session,
+    game_id: &str,
     assistant_content: &str,
     store: &dyn HarpeStore,
     llm: &dyn LlmClient,
@@ -348,7 +414,7 @@ async fn update_memory_after_turn(
     let updated_summary = llm
         .summarize(SummarizeRequest {
             previous_summary,
-            messages: recent_messages,
+            messages: recent_messages.clone(),
         })
         .await?;
 
@@ -369,7 +435,163 @@ async fn update_memory_after_turn(
         })
         .await?;
 
+    let extraction = llm
+        .extract_memory(ExtractMemoryRequest {
+            game_id: game_id.to_owned(),
+            session_id: session.id.clone(),
+            messages: recent_messages,
+        })
+        .await?;
+    persist_extraction(session, game_id, extraction, store, llm).await?;
+
     Ok(())
+}
+
+async fn persist_extraction(
+    session: &Session,
+    game_id: &str,
+    extraction: MemoryExtraction,
+    store: &dyn HarpeStore,
+    llm: &dyn LlmClient,
+) -> Result<()> {
+    for event in extraction.events {
+        if event.summary.trim().is_empty() {
+            continue;
+        }
+
+        let event = store
+            .save_event(NewEvent {
+                session_id: session.id.clone(),
+                summary: event.summary,
+                importance: event.importance,
+            })
+            .await?;
+        save_embedded_memory(session, "event", event.summary.as_str(), store, llm).await?;
+    }
+
+    let existing_characters = store.list_characters(game_id).await?;
+    for character in extraction.character_updates {
+        if character.name.trim().is_empty() {
+            continue;
+        }
+
+        let existing_id = existing_characters
+            .iter()
+            .find(|existing| same_name(&existing.name, &character.name))
+            .map(|existing| existing.id.clone());
+        let character = store
+            .upsert_character(UpsertCharacter {
+                id: existing_id,
+                game_id: game_id.to_owned(),
+                name: character.name,
+                description: character.description,
+                status: character.status,
+            })
+            .await?;
+        save_embedded_memory(
+            session,
+            "character",
+            &format!(
+                "{} | status: {} | {}",
+                character.name, character.status, character.description
+            ),
+            store,
+            llm,
+        )
+        .await?;
+    }
+
+    let existing_facts = store.list_world_facts(game_id, 100).await?;
+    for fact in extraction.world_facts {
+        if fact.subject.trim().is_empty()
+            || fact.predicate.trim().is_empty()
+            || fact.object.trim().is_empty()
+        {
+            continue;
+        }
+
+        let existing_id = existing_facts
+            .iter()
+            .find(|existing| same_fact(existing, &fact.subject, &fact.predicate, &fact.object))
+            .map(|existing| existing.id.clone());
+        let fact = store
+            .upsert_world_fact(UpsertWorldFact {
+                id: existing_id,
+                game_id: game_id.to_owned(),
+                subject: fact.subject,
+                predicate: fact.predicate,
+                object: fact.object,
+                content: fact.content,
+                confidence: fact.confidence,
+            })
+            .await?;
+        save_embedded_memory(session, "world_fact", &fact.content, store, llm).await?;
+    }
+
+    let existing_locations = store.list_locations(game_id).await?;
+    for location in extraction.locations {
+        if location.name.trim().is_empty() {
+            continue;
+        }
+
+        let existing_id = existing_locations
+            .iter()
+            .find(|existing| same_name(&existing.name, &location.name))
+            .map(|existing| existing.id.clone());
+        let location = store
+            .upsert_location(UpsertLocation {
+                id: existing_id,
+                game_id: game_id.to_owned(),
+                name: location.name,
+                description: location.description,
+            })
+            .await?;
+        save_embedded_memory(
+            session,
+            "location",
+            &format!("{} | {}", location.name, location.description),
+            store,
+            llm,
+        )
+        .await?;
+    }
+
+    Ok(())
+}
+
+async fn save_embedded_memory(
+    session: &Session,
+    kind: &str,
+    content: &str,
+    store: &dyn HarpeStore,
+    llm: &dyn LlmClient,
+) -> Result<()> {
+    let content = content.trim();
+    if content.is_empty() {
+        return Ok(());
+    }
+
+    let embedding = llm.embed(content).await?;
+    store
+        .save_memory_chunk(NewMemoryChunk {
+            session_id: session.id.clone(),
+            kind: kind.to_owned(),
+            content: content.to_owned(),
+            embedding,
+        })
+        .await?;
+
+    Ok(())
+}
+
+fn same_name(left: &str, right: &str) -> bool {
+    left.trim().eq_ignore_ascii_case(right.trim())
+}
+
+fn same_fact(fact: &WorldFact, subject: &str, predicate: &str, object: &str) -> bool {
+    same_name(&fact.subject, subject)
+        && same_name(&fact.predicate, predicate)
+        && same_name(&fact.object, object)
 }
 
 fn limit_from_u32(limit: u32) -> usize {
@@ -429,6 +651,39 @@ fn character_to_pb(character: Character) -> pb::Character {
         description: character.description,
         status: character.status,
         updated_at: character.updated_at.to_rfc3339(),
+    }
+}
+
+fn event_to_pb(event: Event) -> pb::Event {
+    pb::Event {
+        id: event.id,
+        session_id: event.session_id,
+        summary: event.summary,
+        importance: event.importance,
+        created_at: event.created_at.to_rfc3339(),
+    }
+}
+
+fn world_fact_to_pb(fact: WorldFact) -> pb::WorldFact {
+    pb::WorldFact {
+        id: fact.id,
+        game_id: fact.game_id,
+        subject: fact.subject,
+        predicate: fact.predicate,
+        object: fact.object,
+        content: fact.content,
+        confidence: fact.confidence,
+        updated_at: fact.updated_at.to_rfc3339(),
+    }
+}
+
+fn location_to_pb(location: Location) -> pb::Location {
+    pb::Location {
+        id: location.id,
+        game_id: location.game_id,
+        name: location.name,
+        description: location.description,
+        updated_at: location.updated_at.to_rfc3339(),
     }
 }
 

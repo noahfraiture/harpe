@@ -1,4 +1,6 @@
-use crate::domain::{Character, MemoryHit, Message, MessageRole, StorySummary};
+use crate::domain::{
+    Character, Event, Location, MemoryHit, Message, MessageRole, StorySummary, WorldFact,
+};
 use crate::llm::{ChatMessage, ChatRequest};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -22,8 +24,11 @@ impl Default for ContextBuilder {
 pub struct ContextInputs {
     pub base_system_prompt: String,
     pub summary: Option<StorySummary>,
+    pub recent_events: Vec<Event>,
     pub memories: Vec<MemoryHit>,
     pub characters: Vec<Character>,
+    pub world_facts: Vec<WorldFact>,
+    pub locations: Vec<Location>,
     pub recent_messages: Vec<Message>,
 }
 
@@ -61,6 +66,17 @@ impl ContextBuilder {
             sections.push(format!("Story summary:\n{}", summary.content.trim()));
         }
 
+        let recent_events = input
+            .recent_events
+            .iter()
+            .filter(|event| !event.summary.trim().is_empty())
+            .map(|event| format!("- {}", event.summary.trim()))
+            .collect::<Vec<_>>();
+
+        if !recent_events.is_empty() {
+            sections.push(format!("Recent events:\n{}", recent_events.join("\n")));
+        }
+
         let memories = input
             .memories
             .iter()
@@ -84,6 +100,28 @@ impl ContextBuilder {
             sections.push(format!("Known characters:\n{}", characters.join("\n")));
         }
 
+        let world_facts = input
+            .world_facts
+            .iter()
+            .filter(|fact| !fact.content.trim().is_empty())
+            .map(format_world_fact)
+            .collect::<Vec<_>>();
+
+        if !world_facts.is_empty() {
+            sections.push(format!("World facts:\n{}", world_facts.join("\n")));
+        }
+
+        let locations = input
+            .locations
+            .iter()
+            .filter(|location| !location.name.trim().is_empty())
+            .map(format_location)
+            .collect::<Vec<_>>();
+
+        if !locations.is_empty() {
+            sections.push(format!("Known locations:\n{}", locations.join("\n")));
+        }
+
         sections
             .into_iter()
             .filter(|section| !section.trim().is_empty())
@@ -104,6 +142,31 @@ fn format_character(character: &Character) -> String {
     }
 
     format!("- {}", parts.join(" | "))
+}
+
+fn format_world_fact(fact: &WorldFact) -> String {
+    if fact.content.trim().is_empty() {
+        format!(
+            "- {} {} {}",
+            fact.subject.trim(),
+            fact.predicate.trim(),
+            fact.object.trim()
+        )
+    } else {
+        format!("- {}", fact.content.trim())
+    }
+}
+
+fn format_location(location: &Location) -> String {
+    if location.description.trim().is_empty() {
+        format!("- {}", location.name.trim())
+    } else {
+        format!(
+            "- {} | {}",
+            location.name.trim(),
+            location.description.trim()
+        )
+    }
 }
 
 pub fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
@@ -151,6 +214,13 @@ mod tests {
                 content: "The party entered the archive.".to_owned(),
                 updated_at: now,
             }),
+            recent_events: vec![Event {
+                id: "event-1".to_owned(),
+                session_id: "session-1".to_owned(),
+                summary: "Mira found the archive stairs.".to_owned(),
+                importance: 3,
+                created_at: now,
+            }],
             memories: vec![MemoryHit {
                 chunk: MemoryChunk {
                     id: "memory-1".to_owned(),
@@ -168,6 +238,23 @@ mod tests {
                 name: "Mira".to_owned(),
                 description: "Archivist".to_owned(),
                 status: "wounded".to_owned(),
+                updated_at: now,
+            }],
+            world_facts: vec![WorldFact {
+                id: "fact-1".to_owned(),
+                game_id: "game-1".to_owned(),
+                subject: "silver key".to_owned(),
+                predicate: "opens".to_owned(),
+                object: "lower vault".to_owned(),
+                content: "The silver key opens the lower vault.".to_owned(),
+                confidence: 0.9,
+                updated_at: now,
+            }],
+            locations: vec![Location {
+                id: "location-1".to_owned(),
+                game_id: "game-1".to_owned(),
+                name: "Lower Vault".to_owned(),
+                description: "A sealed chamber under the archive".to_owned(),
                 updated_at: now,
             }],
             recent_messages: vec![
@@ -197,8 +284,10 @@ mod tests {
 
         assert_eq!(chat.messages.len(), 3);
         assert!(chat.messages[0].content.contains("Story summary"));
+        assert!(chat.messages[0].content.contains("Recent events"));
         assert!(chat.messages[0].content.contains("silver key"));
         assert!(chat.messages[0].content.contains("Mira"));
+        assert!(chat.messages[0].content.contains("Lower Vault"));
         assert_eq!(chat.messages[1].content, "second");
         assert_eq!(chat.messages[2].content, "third");
     }

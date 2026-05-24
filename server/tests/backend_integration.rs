@@ -4,8 +4,9 @@ use futures_util::StreamExt;
 use harpe_server::api::grpc::HarpeGrpc;
 use harpe_server::db::surreal::SurrealStore;
 use harpe_server::domain::{
-    MessageRole, NewGame, NewMemoryChunk, NewMessage, NewSession, UpsertCharacter,
-    UpsertStorySummary,
+    ExtractedCharacterUpdate, ExtractedEvent, ExtractedLocation, ExtractedWorldFact,
+    MemoryExtraction, MessageRole, NewEvent, NewGame, NewMemoryChunk, NewMessage, NewSession,
+    UpsertCharacter, UpsertLocation, UpsertStorySummary, UpsertWorldFact,
 };
 use harpe_server::llm::EchoLlm;
 use harpe_server::pb::game_service_client::GameServiceClient;
@@ -16,7 +17,7 @@ use harpe_server::pb::session_service_client::SessionServiceClient;
 use harpe_server::pb::session_service_server::SessionServiceServer;
 use harpe_server::pb::{
     CreateGameRequest, CreateSessionRequest, GetStorySummaryRequest, ListMessagesRequest,
-    SendMessageRequest,
+    ListWorldFactsRequest, SearchMemoryRequest, SendMessageRequest,
 };
 use harpe_server::store::HarpeStore;
 use tokio::net::TcpListener;
@@ -91,6 +92,47 @@ async fn surreal_store_round_trips_conversation_memory_and_characters() {
     let characters = store.list_characters(&game.id).await.unwrap();
     assert_eq!(characters, vec![character]);
 
+    let event = store
+        .save_event(NewEvent {
+            session_id: session.id.clone(),
+            summary: "Mira found the vault stairs.".to_owned(),
+            importance: 4,
+        })
+        .await
+        .unwrap();
+    let events = store.list_events(&session.id, 10).await.unwrap();
+    assert_eq!(events, vec![event]);
+
+    let location = store
+        .upsert_location(UpsertLocation {
+            id: None,
+            game_id: game.id.clone(),
+            name: "Lower Vault".to_owned(),
+            description: "A sealed chamber beneath the archive".to_owned(),
+        })
+        .await
+        .unwrap();
+    let locations = store.list_locations(&game.id).await.unwrap();
+    assert_eq!(locations, vec![location]);
+
+    let fact = store
+        .upsert_world_fact(UpsertWorldFact {
+            id: None,
+            game_id: game.id.clone(),
+            subject: "silver key".to_owned(),
+            predicate: "opens".to_owned(),
+            object: "lower vault".to_owned(),
+            content: String::new(),
+            confidence: 1.4,
+        })
+        .await
+        .unwrap();
+    let facts = store.list_world_facts(&game.id, 10).await.unwrap();
+    assert_eq!(facts.len(), 1);
+    assert_eq!(facts[0].id, fact.id);
+    assert_eq!(facts[0].content, "silver key opens lower vault");
+    assert_eq!(facts[0].confidence, 1.0);
+
     let saved = store
         .save_memory_chunk(NewMemoryChunk {
             session_id: session.id.clone(),
@@ -112,10 +154,32 @@ async fn surreal_store_round_trips_conversation_memory_and_characters() {
 #[tokio::test]
 async fn grpc_send_message_streams_response_and_updates_memory() {
     let store = Arc::new(test_store().await);
-    let llm = Arc::new(EchoLlm::new(vec![
-        "The gate ".to_owned(),
-        "opens.".to_owned(),
-    ]));
+    let llm = Arc::new(
+        EchoLlm::new(vec!["The gate ".to_owned(), "opens.".to_owned()]).with_extraction(
+            MemoryExtraction {
+                events: vec![ExtractedEvent {
+                    summary: "The rusted sea gate opens.".to_owned(),
+                    importance: 4,
+                }],
+                character_updates: vec![ExtractedCharacterUpdate {
+                    name: "Mira".to_owned(),
+                    description: "A scout watching the gate".to_owned(),
+                    status: "alert".to_owned(),
+                }],
+                world_facts: vec![ExtractedWorldFact {
+                    subject: "sea gate".to_owned(),
+                    predicate: "guards".to_owned(),
+                    object: "Iron Coast harbor".to_owned(),
+                    content: "The sea gate guards Iron Coast harbor.".to_owned(),
+                    confidence: 0.9,
+                }],
+                locations: vec![ExtractedLocation {
+                    name: "Iron Coast harbor".to_owned(),
+                    description: "A storm-battered harbor behind a rusted gate".to_owned(),
+                }],
+            },
+        ),
+    );
     let service = HarpeGrpc::new(store, llm);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -147,7 +211,7 @@ async fn grpc_send_message_streams_response_and_updates_memory() {
     let mut session_client = SessionServiceClient::new(channel.clone());
     let session = session_client
         .create_session(CreateSessionRequest {
-            game_id: game.id,
+            game_id: game.id.clone(),
             title: "First watch".to_owned(),
         })
         .await
@@ -197,6 +261,63 @@ async fn grpc_send_message_streams_response_and_updates_memory() {
         .unwrap()
         .into_inner();
     assert!(summary.content.contains("The gate opens."));
+
+    let events = memory_client
+        .list_events(harpe_server::pb::ListEventsRequest {
+            session_id: summary.session_id.clone(),
+            limit: 10,
+        })
+        .await
+        .unwrap()
+        .into_inner()
+        .events;
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].summary, "The rusted sea gate opens.");
+
+    let characters = memory_client
+        .list_characters(harpe_server::pb::ListCharactersRequest {
+            game_id: game.id.clone(),
+        })
+        .await
+        .unwrap()
+        .into_inner()
+        .characters;
+    assert_eq!(characters.len(), 1);
+    assert_eq!(characters[0].name, "Mira");
+    assert_eq!(characters[0].status, "alert");
+
+    let facts = memory_client
+        .list_world_facts(ListWorldFactsRequest {
+            game_id: game.id.clone(),
+            limit: 10,
+        })
+        .await
+        .unwrap()
+        .into_inner()
+        .facts;
+    assert_eq!(facts.len(), 1);
+    assert_eq!(facts[0].content, "The sea gate guards Iron Coast harbor.");
+
+    let locations = memory_client
+        .list_locations(harpe_server::pb::ListLocationsRequest { game_id: game.id })
+        .await
+        .unwrap()
+        .into_inner()
+        .locations;
+    assert_eq!(locations.len(), 1);
+    assert_eq!(locations[0].name, "Iron Coast harbor");
+
+    let hits = memory_client
+        .search_memory(SearchMemoryRequest {
+            session_id: summary.session_id,
+            query: "sea gate harbor".to_owned(),
+            limit: 10,
+        })
+        .await
+        .unwrap()
+        .into_inner()
+        .hits;
+    assert!(hits.iter().any(|hit| hit.kind == "world_fact"));
 
     server.abort();
 }

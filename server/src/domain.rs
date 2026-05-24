@@ -109,6 +109,62 @@ pub struct UpsertCharacter {
     pub status: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Event {
+    pub id: String,
+    pub session_id: String,
+    pub summary: String,
+    pub importance: i32,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NewEvent {
+    pub session_id: String,
+    pub summary: String,
+    pub importance: i32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Location {
+    pub id: String,
+    pub game_id: String,
+    pub name: String,
+    pub description: String,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UpsertLocation {
+    pub id: Option<String>,
+    pub game_id: String,
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WorldFact {
+    pub id: String,
+    pub game_id: String,
+    pub subject: String,
+    pub predicate: String,
+    pub object: String,
+    pub content: String,
+    pub confidence: f32,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct UpsertWorldFact {
+    pub id: Option<String>,
+    pub game_id: String,
+    pub subject: String,
+    pub predicate: String,
+    pub object: String,
+    pub content: String,
+    pub confidence: f32,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MemoryChunk {
     pub id: String,
@@ -131,6 +187,42 @@ pub struct NewMemoryChunk {
 pub struct MemoryHit {
     pub chunk: MemoryChunk,
     pub score: f32,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MemoryExtraction {
+    pub events: Vec<ExtractedEvent>,
+    pub character_updates: Vec<ExtractedCharacterUpdate>,
+    pub world_facts: Vec<ExtractedWorldFact>,
+    pub locations: Vec<ExtractedLocation>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExtractedEvent {
+    pub summary: String,
+    pub importance: i32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExtractedCharacterUpdate {
+    pub name: String,
+    pub description: String,
+    pub status: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExtractedWorldFact {
+    pub subject: String,
+    pub predicate: String,
+    pub object: String,
+    pub content: String,
+    pub confidence: f32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExtractedLocation {
+    pub name: String,
+    pub description: String,
 }
 
 #[cfg(test)]
@@ -161,5 +253,15 @@ mod tests {
         assert!(!first.is_empty());
         assert!(!second.is_empty());
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn empty_memory_extraction_has_no_updates() {
+        let extraction = MemoryExtraction::default();
+
+        assert!(extraction.events.is_empty());
+        assert!(extraction.character_updates.is_empty());
+        assert!(extraction.world_facts.is_empty());
+        assert!(extraction.locations.is_empty());
     }
 }

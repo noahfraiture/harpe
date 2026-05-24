@@ -7,7 +7,8 @@ The current milestone is a Rust gRPC server with:
 - generated protobuf API for games, sessions, messages, summaries, characters, and memory search
 - SurrealDB storage through the Rust SDK
 - an LLM abstraction with a deterministic development implementation
-- a context builder that combines system prompt, story summary, recent messages, character state, and relevant memories
+- structured memory extraction for events, character updates, world facts, and locations
+- a context builder that combines system prompt, story summary, recent events, relevant memories, character state, world facts, locations, and recent messages
 - unit tests plus integration tests covering embedded SurrealDB and a real gRPC client/server path
 
 ## Run
@@ -31,4 +32,3 @@ cargo clippy --all-targets --all-features -- -D warnings
 ```
 
 The integration tests use SurrealDB's embedded in-memory engine, so no external database is required yet.
-

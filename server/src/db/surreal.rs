@@ -8,8 +8,9 @@ use surrealdb::engine::any::{self, Any};
 use surrealdb::types::SurrealValue;
 
 use crate::domain::{
-    Character, Game, MemoryChunk, MemoryHit, Message, MessageRole, NewGame, NewMemoryChunk,
-    NewMessage, NewSession, Session, StorySummary, UpsertCharacter, UpsertStorySummary, new_id,
+    Character, Event, Game, Location, MemoryChunk, MemoryHit, Message, MessageRole, NewEvent,
+    NewGame, NewMemoryChunk, NewMessage, NewSession, Session, StorySummary, UpsertCharacter,
+    UpsertLocation, UpsertStorySummary, UpsertWorldFact, WorldFact, new_id,
 };
 use crate::engine::cosine_similarity;
 use crate::store::HarpeStore;
@@ -21,11 +22,17 @@ DEFINE TABLE session SCHEMALESS;
 DEFINE TABLE message SCHEMALESS;
 DEFINE TABLE summary SCHEMALESS;
 DEFINE TABLE character SCHEMALESS;
+DEFINE TABLE event SCHEMALESS;
+DEFINE TABLE location SCHEMALESS;
+DEFINE TABLE world_fact SCHEMALESS;
 DEFINE TABLE memory_chunk SCHEMALESS;
 DEFINE INDEX game_created_at ON game FIELDS created_at;
 DEFINE INDEX session_game_id ON session FIELDS game_id;
 DEFINE INDEX message_session_id ON message FIELDS session_id;
 DEFINE INDEX character_game_id ON character FIELDS game_id;
+DEFINE INDEX event_session_id ON event FIELDS session_id;
+DEFINE INDEX location_game_id ON location FIELDS game_id;
+DEFINE INDEX world_fact_game_id ON world_fact FIELDS game_id;
 DEFINE INDEX memory_chunk_session_id ON memory_chunk FIELDS session_id;
 "#;
 
@@ -235,6 +242,126 @@ impl HarpeStore for SurrealStore {
             .ok_or_else(|| HarpeError::NotFound(format!("character {character_id}")))
     }
 
+    async fn save_event(&self, input: NewEvent) -> Result<Event> {
+        validate_present("session id", &input.session_id)?;
+        validate_present("event summary", &input.summary)?;
+
+        let row = EventRow {
+            uid: new_id(),
+            session_id: input.session_id,
+            summary: input.summary,
+            importance: normalize_importance(input.importance),
+            created_at: Utc::now(),
+        };
+
+        let created: Option<EventRow> = self
+            .db
+            .create(("event", row.uid.as_str()))
+            .content(row)
+            .await?;
+
+        created
+            .map(Into::into)
+            .ok_or_else(|| HarpeError::Store("SurrealDB did not return created event".to_owned()))
+    }
+
+    async fn list_events(&self, session_id: &str, limit: usize) -> Result<Vec<Event>> {
+        let mut response = self
+            .db
+            .query(
+                "SELECT * FROM event WHERE session_id = $session_id ORDER BY created_at DESC LIMIT $limit",
+            )
+            .bind(("session_id", session_id.to_owned()))
+            .bind(("limit", normalize_limit(limit) as i64))
+            .await?;
+        let mut rows: Vec<EventRow> = response.take(0)?;
+        rows.reverse();
+
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
+    async fn upsert_location(&self, input: UpsertLocation) -> Result<Location> {
+        validate_present("game id", &input.game_id)?;
+        validate_present("location name", &input.name)?;
+
+        let row = LocationRow {
+            uid: input.id.unwrap_or_else(new_id),
+            game_id: input.game_id,
+            name: input.name,
+            description: input.description,
+            updated_at: Utc::now(),
+        };
+
+        let upserted: Option<LocationRow> = self
+            .db
+            .upsert(("location", row.uid.as_str()))
+            .content(row)
+            .await?;
+
+        upserted.map(Into::into).ok_or_else(|| {
+            HarpeError::Store("SurrealDB did not return upserted location".to_owned())
+        })
+    }
+
+    async fn list_locations(&self, game_id: &str) -> Result<Vec<Location>> {
+        let mut response = self
+            .db
+            .query("SELECT * FROM location WHERE game_id = $game_id ORDER BY name ASC")
+            .bind(("game_id", game_id.to_owned()))
+            .await?;
+        let rows: Vec<LocationRow> = response.take(0)?;
+
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
+    async fn upsert_world_fact(&self, input: UpsertWorldFact) -> Result<WorldFact> {
+        validate_present("game id", &input.game_id)?;
+        validate_present("world fact subject", &input.subject)?;
+        validate_present("world fact predicate", &input.predicate)?;
+        validate_present("world fact object", &input.object)?;
+
+        let content = world_fact_content(
+            &input.subject,
+            &input.predicate,
+            &input.object,
+            &input.content,
+        );
+        let row = WorldFactRow {
+            uid: input.id.unwrap_or_else(new_id),
+            game_id: input.game_id,
+            subject: input.subject,
+            predicate: input.predicate,
+            object: input.object,
+            content,
+            confidence: normalize_confidence(input.confidence),
+            updated_at: Utc::now(),
+        };
+
+        let upserted: Option<WorldFactRow> = self
+            .db
+            .upsert(("world_fact", row.uid.as_str()))
+            .content(row)
+            .await?;
+
+        upserted.map(Into::into).ok_or_else(|| {
+            HarpeError::Store("SurrealDB did not return upserted world fact".to_owned())
+        })
+    }
+
+    async fn list_world_facts(&self, game_id: &str, limit: usize) -> Result<Vec<WorldFact>> {
+        let mut response = self
+            .db
+            .query(
+                "SELECT * FROM world_fact WHERE game_id = $game_id ORDER BY updated_at DESC LIMIT $limit",
+            )
+            .bind(("game_id", game_id.to_owned()))
+            .bind(("limit", normalize_limit(limit) as i64))
+            .await?;
+        let rows: Vec<WorldFactRow> = response.take(0)?;
+
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
     async fn save_memory_chunk(&self, input: NewMemoryChunk) -> Result<MemoryHit> {
         validate_present("session id", &input.session_id)?;
         validate_present("memory content", &input.content)?;
@@ -319,6 +446,22 @@ fn normalize_limit(limit: usize) -> usize {
         0 => 50,
         1..=100 => limit,
         _ => 100,
+    }
+}
+
+fn normalize_importance(importance: i32) -> i32 {
+    importance.clamp(1, 5)
+}
+
+fn normalize_confidence(confidence: f32) -> f32 {
+    confidence.clamp(0.0, 1.0)
+}
+
+fn world_fact_content(subject: &str, predicate: &str, object: &str, content: &str) -> String {
+    if content.trim().is_empty() {
+        format!("{} {} {}", subject.trim(), predicate.trim(), object.trim())
+    } else {
+        content.to_owned()
     }
 }
 
@@ -448,6 +591,75 @@ impl From<CharacterRow> for Character {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, SurrealValue)]
+struct EventRow {
+    uid: String,
+    session_id: String,
+    summary: String,
+    importance: i32,
+    created_at: DateTime<Utc>,
+}
+
+impl From<EventRow> for Event {
+    fn from(value: EventRow) -> Self {
+        Self {
+            id: value.uid,
+            session_id: value.session_id,
+            summary: value.summary,
+            importance: value.importance,
+            created_at: value.created_at,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, SurrealValue)]
+struct LocationRow {
+    uid: String,
+    game_id: String,
+    name: String,
+    description: String,
+    updated_at: DateTime<Utc>,
+}
+
+impl From<LocationRow> for Location {
+    fn from(value: LocationRow) -> Self {
+        Self {
+            id: value.uid,
+            game_id: value.game_id,
+            name: value.name,
+            description: value.description,
+            updated_at: value.updated_at,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, SurrealValue)]
+struct WorldFactRow {
+    uid: String,
+    game_id: String,
+    subject: String,
+    predicate: String,
+    object: String,
+    content: String,
+    confidence: f32,
+    updated_at: DateTime<Utc>,
+}
+
+impl From<WorldFactRow> for WorldFact {
+    fn from(value: WorldFactRow) -> Self {
+        Self {
+            id: value.uid,
+            game_id: value.game_id,
+            subject: value.subject,
+            predicate: value.predicate,
+            object: value.object,
+            content: value.content,
+            confidence: value.confidence,
+            updated_at: value.updated_at,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, SurrealValue)]
 struct MemoryChunkRow {
     uid: String,
     session_id: String,
@@ -489,5 +701,27 @@ mod tests {
         assert_eq!(normalize_limit(0), 50);
         assert_eq!(normalize_limit(10), 10);
         assert_eq!(normalize_limit(1_000), 100);
+    }
+
+    #[test]
+    fn extracted_scores_are_normalized() {
+        assert_eq!(normalize_importance(-1), 1);
+        assert_eq!(normalize_importance(3), 3);
+        assert_eq!(normalize_importance(9), 5);
+        assert_eq!(normalize_confidence(-0.5), 0.0);
+        assert_eq!(normalize_confidence(0.75), 0.75);
+        assert_eq!(normalize_confidence(2.0), 1.0);
+    }
+
+    #[test]
+    fn world_fact_content_is_derived_when_blank() {
+        assert_eq!(
+            world_fact_content(" silver key ", " opens ", " lower vault ", ""),
+            "silver key opens lower vault"
+        );
+        assert_eq!(
+            world_fact_content("silver key", "opens", "lower vault", "A custom fact."),
+            "A custom fact."
+        );
     }
 }

@@ -19,6 +19,9 @@ service MemoryService {
   rpc GetStorySummary(GetStorySummaryRequest) returns (StorySummary);
   rpc ListCharacters(ListCharactersRequest) returns (ListCharactersResponse);
   rpc GetCharacter(GetCharacterRequest) returns (Character);
+  rpc ListEvents(ListEventsRequest) returns (ListEventsResponse);
+  rpc ListWorldFacts(ListWorldFactsRequest) returns (ListWorldFactsResponse);
+  rpc ListLocations(ListLocationsRequest) returns (ListLocationsResponse);
   rpc SearchMemory(SearchMemoryRequest) returns (SearchMemoryResponse);
 }
 
@@ -64,6 +67,33 @@ message Character {
   string description = 4;
   string status = 5;
   string updated_at = 6;
+}
+
+message Event {
+  string id = 1;
+  string session_id = 2;
+  string summary = 3;
+  int32 importance = 4;
+  string created_at = 5;
+}
+
+message WorldFact {
+  string id = 1;
+  string game_id = 2;
+  string subject = 3;
+  string predicate = 4;
+  string object = 5;
+  string content = 6;
+  float confidence = 7;
+  string updated_at = 8;
+}
+
+message Location {
+  string id = 1;
+  string game_id = 2;
+  string name = 3;
+  string description = 4;
+  string updated_at = 5;
 }
 
 message MemoryHit {
@@ -137,6 +167,32 @@ message GetCharacterRequest {
   string character_id = 1;
 }
 
+message ListEventsRequest {
+  string session_id = 1;
+  uint32 limit = 2;
+}
+
+message ListEventsResponse {
+  repeated Event events = 1;
+}
+
+message ListWorldFactsRequest {
+  string game_id = 1;
+  uint32 limit = 2;
+}
+
+message ListWorldFactsResponse {
+  repeated WorldFact facts = 1;
+}
+
+message ListLocationsRequest {
+  string game_id = 1;
+}
+
+message ListLocationsResponse {
+  repeated Location locations = 1;
+}
+
 message SearchMemoryRequest {
   string session_id = 1;
   string query = 2;
@@ -146,4 +202,3 @@ message SearchMemoryRequest {
 message SearchMemoryResponse {
   repeated MemoryHit hits = 1;
 }
-
