@@ -5,36 +5,178 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use surrealdb::Surreal;
 use surrealdb::engine::any::{self, Any};
-use surrealdb::types::SurrealValue;
+use surrealdb::types::{RecordId, SurrealValue, ToSql};
 
 use crate::domain::{
-    Character, Event, Game, Location, MemoryChunk, MemoryHit, Message, MessageRole, NewEvent,
-    NewGame, NewMemoryChunk, NewMessage, NewSession, Session, StorySummary, UpsertCharacter,
-    UpsertLocation, UpsertStorySummary, UpsertWorldFact, WorldFact, new_id,
+    Character, Event, Game, GraphEdge, GraphRelationKind, Location, MemoryChunk, MemoryHit,
+    Message, MessageRole, NewEvent, NewGame, NewMemoryChunk, NewMessage, NewSession, Session,
+    StorySummary, UpsertCharacter, UpsertLocation, UpsertStorySummary, UpsertWorldFact, WorldFact,
+    new_id,
 };
 use crate::engine::cosine_similarity;
 use crate::store::HarpeStore;
 use crate::{HarpeError, Result};
 
-const MIGRATIONS: &str = r#"
-DEFINE TABLE game SCHEMALESS;
-DEFINE TABLE session SCHEMALESS;
-DEFINE TABLE message SCHEMALESS;
-DEFINE TABLE summary SCHEMALESS;
-DEFINE TABLE character SCHEMALESS;
-DEFINE TABLE event SCHEMALESS;
-DEFINE TABLE location SCHEMALESS;
-DEFINE TABLE world_fact SCHEMALESS;
-DEFINE TABLE memory_chunk SCHEMALESS;
-DEFINE INDEX game_created_at ON game FIELDS created_at;
-DEFINE INDEX session_game_id ON session FIELDS game_id;
-DEFINE INDEX message_session_id ON message FIELDS session_id;
-DEFINE INDEX character_game_id ON character FIELDS game_id;
-DEFINE INDEX event_session_id ON event FIELDS session_id;
-DEFINE INDEX location_game_id ON location FIELDS game_id;
-DEFINE INDEX world_fact_game_id ON world_fact FIELDS game_id;
-DEFINE INDEX memory_chunk_session_id ON memory_chunk FIELDS session_id;
+const MIGRATION_BOOTSTRAP: &str = r#"
+DEFINE TABLE OVERWRITE schema_migration SCHEMAFULL;
+DEFINE FIELD OVERWRITE uid ON schema_migration TYPE string;
+DEFINE FIELD OVERWRITE version ON schema_migration TYPE int;
+DEFINE FIELD OVERWRITE name ON schema_migration TYPE string;
+DEFINE FIELD OVERWRITE applied_at ON schema_migration TYPE datetime;
+DEFINE INDEX OVERWRITE schema_migration_version ON schema_migration FIELDS version UNIQUE;
 "#;
+
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "core_schema",
+        sql: r#"
+DEFINE TABLE OVERWRITE game SCHEMAFULL;
+DEFINE FIELD OVERWRITE uid ON game TYPE string;
+DEFINE FIELD OVERWRITE title ON game TYPE string;
+DEFINE FIELD OVERWRITE system_prompt ON game TYPE string;
+DEFINE FIELD OVERWRITE created_at ON game TYPE datetime;
+DEFINE INDEX OVERWRITE game_created_at ON game FIELDS created_at;
+
+DEFINE TABLE OVERWRITE session SCHEMAFULL;
+DEFINE FIELD OVERWRITE uid ON session TYPE string;
+DEFINE FIELD OVERWRITE game_id ON session TYPE string;
+DEFINE FIELD OVERWRITE title ON session TYPE string;
+DEFINE FIELD OVERWRITE created_at ON session TYPE datetime;
+DEFINE INDEX OVERWRITE session_game_id ON session FIELDS game_id;
+DEFINE INDEX OVERWRITE session_game_created_at ON session FIELDS game_id, created_at;
+
+DEFINE TABLE OVERWRITE message SCHEMAFULL;
+DEFINE FIELD OVERWRITE uid ON message TYPE string;
+DEFINE FIELD OVERWRITE session_id ON message TYPE string;
+DEFINE FIELD OVERWRITE role ON message TYPE string;
+DEFINE FIELD OVERWRITE content ON message TYPE string;
+DEFINE FIELD OVERWRITE created_at ON message TYPE datetime;
+DEFINE INDEX OVERWRITE message_session_id ON message FIELDS session_id;
+DEFINE INDEX OVERWRITE message_session_created_at ON message FIELDS session_id, created_at;
+
+DEFINE TABLE OVERWRITE summary SCHEMAFULL;
+DEFINE FIELD OVERWRITE uid ON summary TYPE string;
+DEFINE FIELD OVERWRITE session_id ON summary TYPE string;
+DEFINE FIELD OVERWRITE content ON summary TYPE string;
+DEFINE FIELD OVERWRITE updated_at ON summary TYPE datetime;
+DEFINE INDEX OVERWRITE summary_session_id ON summary FIELDS session_id UNIQUE;
+
+DEFINE TABLE OVERWRITE character SCHEMAFULL;
+DEFINE FIELD OVERWRITE uid ON character TYPE string;
+DEFINE FIELD OVERWRITE game_id ON character TYPE string;
+DEFINE FIELD OVERWRITE name ON character TYPE string;
+DEFINE FIELD OVERWRITE description ON character TYPE string;
+DEFINE FIELD OVERWRITE status ON character TYPE string;
+DEFINE FIELD OVERWRITE updated_at ON character TYPE datetime;
+DEFINE INDEX OVERWRITE character_game_id ON character FIELDS game_id;
+DEFINE INDEX OVERWRITE character_game_name ON character FIELDS game_id, name;
+
+DEFINE TABLE OVERWRITE event SCHEMAFULL;
+DEFINE FIELD OVERWRITE uid ON event TYPE string;
+DEFINE FIELD OVERWRITE session_id ON event TYPE string;
+DEFINE FIELD OVERWRITE summary ON event TYPE string;
+DEFINE FIELD OVERWRITE importance ON event TYPE int;
+DEFINE FIELD OVERWRITE created_at ON event TYPE datetime;
+DEFINE INDEX OVERWRITE event_session_id ON event FIELDS session_id;
+DEFINE INDEX OVERWRITE event_session_created_at ON event FIELDS session_id, created_at;
+
+DEFINE TABLE OVERWRITE location SCHEMAFULL;
+DEFINE FIELD OVERWRITE uid ON location TYPE string;
+DEFINE FIELD OVERWRITE game_id ON location TYPE string;
+DEFINE FIELD OVERWRITE name ON location TYPE string;
+DEFINE FIELD OVERWRITE description ON location TYPE string;
+DEFINE FIELD OVERWRITE updated_at ON location TYPE datetime;
+DEFINE INDEX OVERWRITE location_game_id ON location FIELDS game_id;
+DEFINE INDEX OVERWRITE location_game_name ON location FIELDS game_id, name;
+
+DEFINE TABLE OVERWRITE world_fact SCHEMAFULL;
+DEFINE FIELD OVERWRITE uid ON world_fact TYPE string;
+DEFINE FIELD OVERWRITE game_id ON world_fact TYPE string;
+DEFINE FIELD OVERWRITE subject ON world_fact TYPE string;
+DEFINE FIELD OVERWRITE predicate ON world_fact TYPE string;
+DEFINE FIELD OVERWRITE object ON world_fact TYPE string;
+DEFINE FIELD OVERWRITE content ON world_fact TYPE string;
+DEFINE FIELD OVERWRITE confidence ON world_fact TYPE float;
+DEFINE FIELD OVERWRITE updated_at ON world_fact TYPE datetime;
+DEFINE INDEX OVERWRITE world_fact_game_id ON world_fact FIELDS game_id;
+DEFINE INDEX OVERWRITE world_fact_triplet ON world_fact FIELDS game_id, subject, predicate, object;
+
+DEFINE TABLE OVERWRITE memory_chunk SCHEMAFULL;
+DEFINE FIELD OVERWRITE uid ON memory_chunk TYPE string;
+DEFINE FIELD OVERWRITE session_id ON memory_chunk TYPE string;
+DEFINE FIELD OVERWRITE kind ON memory_chunk TYPE string;
+DEFINE FIELD OVERWRITE content ON memory_chunk TYPE string;
+DEFINE FIELD OVERWRITE embedding ON memory_chunk TYPE array<float>;
+DEFINE FIELD OVERWRITE created_at ON memory_chunk TYPE datetime;
+DEFINE INDEX OVERWRITE memory_chunk_session_id ON memory_chunk FIELDS session_id;
+DEFINE INDEX OVERWRITE memory_chunk_session_kind ON memory_chunk FIELDS session_id, kind;
+"#,
+    },
+    Migration {
+        version: 2,
+        name: "graph_relations",
+        sql: r#"
+DEFINE TABLE OVERWRITE session_in_game TYPE RELATION IN session OUT game SCHEMAFULL;
+DEFINE FIELD OVERWRITE created_at ON session_in_game TYPE datetime;
+DEFINE INDEX OVERWRITE session_in_game_pair ON session_in_game FIELDS in, out UNIQUE;
+
+DEFINE TABLE OVERWRITE message_in_session TYPE RELATION IN message OUT session SCHEMAFULL;
+DEFINE FIELD OVERWRITE created_at ON message_in_session TYPE datetime;
+DEFINE INDEX OVERWRITE message_in_session_pair ON message_in_session FIELDS in, out UNIQUE;
+
+DEFINE TABLE OVERWRITE event_in_session TYPE RELATION IN event OUT session SCHEMAFULL;
+DEFINE FIELD OVERWRITE created_at ON event_in_session TYPE datetime;
+DEFINE INDEX OVERWRITE event_in_session_pair ON event_in_session FIELDS in, out UNIQUE;
+
+DEFINE TABLE OVERWRITE character_in_game TYPE RELATION IN character OUT game SCHEMAFULL;
+DEFINE FIELD OVERWRITE created_at ON character_in_game TYPE datetime;
+DEFINE INDEX OVERWRITE character_in_game_pair ON character_in_game FIELDS in, out UNIQUE;
+
+DEFINE TABLE OVERWRITE location_in_game TYPE RELATION IN location OUT game SCHEMAFULL;
+DEFINE FIELD OVERWRITE created_at ON location_in_game TYPE datetime;
+DEFINE INDEX OVERWRITE location_in_game_pair ON location_in_game FIELDS in, out UNIQUE;
+
+DEFINE TABLE OVERWRITE world_fact_in_game TYPE RELATION IN world_fact OUT game SCHEMAFULL;
+DEFINE FIELD OVERWRITE created_at ON world_fact_in_game TYPE datetime;
+DEFINE INDEX OVERWRITE world_fact_in_game_pair ON world_fact_in_game FIELDS in, out UNIQUE;
+
+DEFINE TABLE OVERWRITE memory_in_session TYPE RELATION IN memory_chunk OUT session SCHEMAFULL;
+DEFINE FIELD OVERWRITE created_at ON memory_in_session TYPE datetime;
+DEFINE INDEX OVERWRITE memory_in_session_pair ON memory_in_session FIELDS in, out UNIQUE;
+
+DEFINE TABLE OVERWRITE event_involves_character TYPE RELATION IN event OUT character SCHEMAFULL;
+DEFINE FIELD OVERWRITE created_at ON event_involves_character TYPE datetime;
+DEFINE INDEX OVERWRITE event_involves_character_pair ON event_involves_character FIELDS in, out UNIQUE;
+
+DEFINE TABLE OVERWRITE event_happened_at_location TYPE RELATION IN event OUT location SCHEMAFULL;
+DEFINE FIELD OVERWRITE created_at ON event_happened_at_location TYPE datetime;
+DEFINE INDEX OVERWRITE event_happened_at_location_pair ON event_happened_at_location FIELDS in, out UNIQUE;
+
+DEFINE TABLE OVERWRITE character_knows_world_fact TYPE RELATION IN character OUT world_fact SCHEMAFULL;
+DEFINE FIELD OVERWRITE created_at ON character_knows_world_fact TYPE datetime;
+DEFINE INDEX OVERWRITE character_knows_world_fact_pair ON character_knows_world_fact FIELDS in, out UNIQUE;
+
+DEFINE TABLE OVERWRITE memory_supports_world_fact TYPE RELATION IN memory_chunk OUT world_fact SCHEMAFULL;
+DEFINE FIELD OVERWRITE created_at ON memory_supports_world_fact TYPE datetime;
+DEFINE INDEX OVERWRITE memory_supports_world_fact_pair ON memory_supports_world_fact FIELDS in, out UNIQUE;
+"#,
+    },
+];
+
+#[derive(Clone, Copy, Debug)]
+struct Migration {
+    version: i32,
+    name: &'static str,
+    sql: &'static str,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AppliedMigration {
+    pub version: i32,
+    pub name: String,
+    pub applied_at: DateTime<Utc>,
+}
 
 #[derive(Clone)]
 pub struct SurrealStore {
@@ -57,12 +199,92 @@ impl SurrealStore {
     }
 
     pub async fn migrate(&self) -> Result<()> {
-        self.db.query(MIGRATIONS).await?;
+        self.db.query(MIGRATION_BOOTSTRAP).await?.check()?;
+        let applied_versions = self
+            .applied_migrations()
+            .await?
+            .into_iter()
+            .map(|migration| migration.version)
+            .collect::<Vec<_>>();
+
+        for migration in MIGRATIONS {
+            if applied_versions.contains(&migration.version) {
+                continue;
+            }
+
+            self.db.query(migration.sql).await?.check()?;
+            self.record_migration(*migration).await?;
+        }
+
         Ok(())
+    }
+
+    pub async fn applied_migrations(&self) -> Result<Vec<AppliedMigration>> {
+        let mut response = self
+            .db
+            .query("SELECT * FROM schema_migration ORDER BY version ASC")
+            .await?;
+        let rows: Vec<MigrationRow> = response.take(0)?;
+
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
+    pub fn migration_versions() -> Vec<i32> {
+        MIGRATIONS
+            .iter()
+            .map(|migration| migration.version)
+            .collect()
     }
 
     pub fn db(&self) -> &Surreal<Any> {
         &self.db
+    }
+
+    async fn record_migration(&self, migration: Migration) -> Result<()> {
+        let row = MigrationRow {
+            uid: migration_id(migration),
+            version: migration.version,
+            name: migration.name.to_owned(),
+            applied_at: Utc::now(),
+        };
+
+        let _: Option<MigrationRow> = self
+            .db
+            .upsert(("schema_migration", row.uid.as_str()))
+            .content(row)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn upsert_graph_relation(
+        &self,
+        relation: GraphRelationKind,
+        in_record_id: &str,
+        out_record_id: &str,
+    ) -> Result<()> {
+        let spec = relation_spec(relation);
+        let edge_id = edge_id(in_record_id, out_record_id);
+
+        self.db
+            .query(
+                "LET $source_record = type::record($in_table, $in_id);
+                 LET $target_record = type::record($out_table, $out_id);
+                 LET $edge_record = type::record($relation_table, $edge_id);
+                 DELETE $edge_record;
+                 RELATE $source_record -> $edge_record -> $target_record
+                 SET created_at = time::now();",
+            )
+            .bind(("relation_table", spec.table.to_owned()))
+            .bind(("edge_id", edge_id))
+            .bind(("in_table", spec.in_table.to_owned()))
+            .bind(("in_id", in_record_id.to_owned()))
+            .bind(("out_table", spec.out_table.to_owned()))
+            .bind(("out_id", out_record_id.to_owned()))
+            .await?
+            .check()?;
+
+        Ok(())
     }
 }
 
@@ -124,9 +346,17 @@ impl HarpeStore for SurrealStore {
             .content(row)
             .await?;
 
-        created
-            .map(Into::into)
-            .ok_or_else(|| HarpeError::Store("SurrealDB did not return created session".to_owned()))
+        let session: Session = created.map(Into::into).ok_or_else(|| {
+            HarpeError::Store("SurrealDB did not return created session".to_owned())
+        })?;
+        self.upsert_graph_relation(
+            GraphRelationKind::SessionInGame,
+            &session.id,
+            &session.game_id,
+        )
+        .await?;
+
+        Ok(session)
     }
 
     async fn get_session(&self, session_id: &str) -> Result<Session> {
@@ -153,10 +383,17 @@ impl HarpeStore for SurrealStore {
             .content(row)
             .await?;
 
-        created
-            .map(TryInto::try_into)
-            .transpose()?
-            .ok_or_else(|| HarpeError::Store("SurrealDB did not return created message".to_owned()))
+        let message: Message = created.map(TryInto::try_into).transpose()?.ok_or_else(|| {
+            HarpeError::Store("SurrealDB did not return created message".to_owned())
+        })?;
+        self.upsert_graph_relation(
+            GraphRelationKind::MessageInSession,
+            &message.id,
+            &message.session_id,
+        )
+        .await?;
+
+        Ok(message)
     }
 
     async fn list_recent_messages(&self, session_id: &str, limit: usize) -> Result<Vec<Message>> {
@@ -220,9 +457,17 @@ impl HarpeStore for SurrealStore {
             .content(row)
             .await?;
 
-        upserted.map(Into::into).ok_or_else(|| {
+        let character: Character = upserted.map(Into::into).ok_or_else(|| {
             HarpeError::Store("SurrealDB did not return upserted character".to_owned())
-        })
+        })?;
+        self.upsert_graph_relation(
+            GraphRelationKind::CharacterInGame,
+            &character.id,
+            &character.game_id,
+        )
+        .await?;
+
+        Ok(character)
     }
 
     async fn list_characters(&self, game_id: &str) -> Result<Vec<Character>> {
@@ -260,9 +505,17 @@ impl HarpeStore for SurrealStore {
             .content(row)
             .await?;
 
-        created
-            .map(Into::into)
-            .ok_or_else(|| HarpeError::Store("SurrealDB did not return created event".to_owned()))
+        let event: Event = created.map(Into::into).ok_or_else(|| {
+            HarpeError::Store("SurrealDB did not return created event".to_owned())
+        })?;
+        self.upsert_graph_relation(
+            GraphRelationKind::EventInSession,
+            &event.id,
+            &event.session_id,
+        )
+        .await?;
+
+        Ok(event)
     }
 
     async fn list_events(&self, session_id: &str, limit: usize) -> Result<Vec<Event>> {
@@ -298,9 +551,17 @@ impl HarpeStore for SurrealStore {
             .content(row)
             .await?;
 
-        upserted.map(Into::into).ok_or_else(|| {
+        let location: Location = upserted.map(Into::into).ok_or_else(|| {
             HarpeError::Store("SurrealDB did not return upserted location".to_owned())
-        })
+        })?;
+        self.upsert_graph_relation(
+            GraphRelationKind::LocationInGame,
+            &location.id,
+            &location.game_id,
+        )
+        .await?;
+
+        Ok(location)
     }
 
     async fn list_locations(&self, game_id: &str) -> Result<Vec<Location>> {
@@ -343,9 +604,13 @@ impl HarpeStore for SurrealStore {
             .content(row)
             .await?;
 
-        upserted.map(Into::into).ok_or_else(|| {
+        let fact: WorldFact = upserted.map(Into::into).ok_or_else(|| {
             HarpeError::Store("SurrealDB did not return upserted world fact".to_owned())
-        })
+        })?;
+        self.upsert_graph_relation(GraphRelationKind::WorldFactInGame, &fact.id, &fact.game_id)
+            .await?;
+
+        Ok(fact)
     }
 
     async fn list_world_facts(&self, game_id: &str, limit: usize) -> Result<Vec<WorldFact>> {
@@ -360,6 +625,37 @@ impl HarpeStore for SurrealStore {
         let rows: Vec<WorldFactRow> = response.take(0)?;
 
         Ok(rows.into_iter().map(Into::into).collect())
+    }
+
+    async fn list_graph_edges(
+        &self,
+        relation: GraphRelationKind,
+        in_record_id: &str,
+    ) -> Result<Vec<GraphEdge>> {
+        let spec = relation_spec(relation);
+        let mut response = self
+            .db
+            .query(
+                "SELECT in AS in_record, out AS out_record, created_at
+                 FROM type::table($relation_table)
+                 WHERE in = type::record($in_table, $in_id)
+                 ORDER BY created_at ASC",
+            )
+            .bind(("relation_table", spec.table.to_owned()))
+            .bind(("in_table", spec.in_table.to_owned()))
+            .bind(("in_id", in_record_id.to_owned()))
+            .await?;
+        let rows: Vec<GraphEdgeRow> = response.take(0)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| GraphEdge {
+                relation,
+                in_record: row.in_record.to_sql(),
+                out_record: row.out_record.to_sql(),
+                created_at: row.created_at,
+            })
+            .collect())
     }
 
     async fn save_memory_chunk(&self, input: NewMemoryChunk) -> Result<MemoryHit> {
@@ -381,14 +677,22 @@ impl HarpeStore for SurrealStore {
             .content(row)
             .await?;
 
-        created
+        let hit = created
             .map(|row| MemoryHit {
                 chunk: row.into(),
                 score: 1.0,
             })
             .ok_or_else(|| {
                 HarpeError::Store("SurrealDB did not return created memory chunk".to_owned())
-            })
+            })?;
+        self.upsert_graph_relation(
+            GraphRelationKind::MemoryInSession,
+            &hit.chunk.id,
+            &hit.chunk.session_id,
+        )
+        .await?;
+
+        Ok(hit)
     }
 
     async fn search_memory(
@@ -441,6 +745,95 @@ fn validate_present(label: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+fn migration_id(migration: Migration) -> String {
+    format!("m{:04}_{}", migration.version, migration.name)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RelationSpec {
+    table: &'static str,
+    in_table: &'static str,
+    out_table: &'static str,
+}
+
+fn relation_spec(relation: GraphRelationKind) -> RelationSpec {
+    match relation {
+        GraphRelationKind::SessionInGame => RelationSpec {
+            table: "session_in_game",
+            in_table: "session",
+            out_table: "game",
+        },
+        GraphRelationKind::MessageInSession => RelationSpec {
+            table: "message_in_session",
+            in_table: "message",
+            out_table: "session",
+        },
+        GraphRelationKind::EventInSession => RelationSpec {
+            table: "event_in_session",
+            in_table: "event",
+            out_table: "session",
+        },
+        GraphRelationKind::CharacterInGame => RelationSpec {
+            table: "character_in_game",
+            in_table: "character",
+            out_table: "game",
+        },
+        GraphRelationKind::LocationInGame => RelationSpec {
+            table: "location_in_game",
+            in_table: "location",
+            out_table: "game",
+        },
+        GraphRelationKind::WorldFactInGame => RelationSpec {
+            table: "world_fact_in_game",
+            in_table: "world_fact",
+            out_table: "game",
+        },
+        GraphRelationKind::MemoryInSession => RelationSpec {
+            table: "memory_in_session",
+            in_table: "memory_chunk",
+            out_table: "session",
+        },
+        GraphRelationKind::EventInvolvesCharacter => RelationSpec {
+            table: "event_involves_character",
+            in_table: "event",
+            out_table: "character",
+        },
+        GraphRelationKind::EventHappenedAtLocation => RelationSpec {
+            table: "event_happened_at_location",
+            in_table: "event",
+            out_table: "location",
+        },
+        GraphRelationKind::CharacterKnowsWorldFact => RelationSpec {
+            table: "character_knows_world_fact",
+            in_table: "character",
+            out_table: "world_fact",
+        },
+        GraphRelationKind::MemorySupportsWorldFact => RelationSpec {
+            table: "memory_supports_world_fact",
+            in_table: "memory_chunk",
+            out_table: "world_fact",
+        },
+    }
+}
+
+fn edge_id(in_record_id: &str, out_record_id: &str) -> String {
+    format!(
+        "{}__{}",
+        sanitize_record_key(in_record_id),
+        sanitize_record_key(out_record_id)
+    )
+}
+
+fn sanitize_record_key(value: &str) -> String {
+    value
+        .chars()
+        .map(|char| match char {
+            'a'..='z' | 'A'..='Z' | '0'..='9' => char,
+            _ => '_',
+        })
+        .collect()
+}
+
 fn normalize_limit(limit: usize) -> usize {
     match limit {
         0 => 50,
@@ -483,6 +876,24 @@ fn lexical_score(query: &str, content: &str) -> f32 {
     let matches = terms.iter().filter(|term| content.contains(**term)).count();
 
     matches as f32 / terms.len() as f32
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, SurrealValue)]
+struct MigrationRow {
+    uid: String,
+    version: i32,
+    name: String,
+    applied_at: DateTime<Utc>,
+}
+
+impl From<MigrationRow> for AppliedMigration {
+    fn from(value: MigrationRow) -> Self {
+        Self {
+            version: value.version,
+            name: value.name,
+            applied_at: value.applied_at,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, SurrealValue)]
@@ -657,6 +1068,13 @@ impl From<WorldFactRow> for WorldFact {
             updated_at: value.updated_at,
         }
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, SurrealValue)]
+struct GraphEdgeRow {
+    in_record: RecordId,
+    out_record: RecordId,
+    created_at: DateTime<Utc>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, SurrealValue)]

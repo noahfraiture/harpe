@@ -189,6 +189,29 @@ pub struct MemoryHit {
     pub score: f32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GraphRelationKind {
+    SessionInGame,
+    MessageInSession,
+    EventInSession,
+    CharacterInGame,
+    LocationInGame,
+    WorldFactInGame,
+    MemoryInSession,
+    EventInvolvesCharacter,
+    EventHappenedAtLocation,
+    CharacterKnowsWorldFact,
+    MemorySupportsWorldFact,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GraphEdge {
+    pub relation: GraphRelationKind,
+    pub in_record: String,
+    pub out_record: String,
+    pub created_at: DateTime<Utc>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MemoryExtraction {
     pub events: Vec<ExtractedEvent>,
@@ -263,5 +286,14 @@ mod tests {
         assert!(extraction.character_updates.is_empty());
         assert!(extraction.world_facts.is_empty());
         assert!(extraction.locations.is_empty());
+    }
+
+    #[test]
+    fn graph_relation_kind_serializes_for_storage_boundaries() {
+        let relation = GraphRelationKind::EventInvolvesCharacter;
+        let encoded = serde_json::to_string(&relation).unwrap();
+        let decoded: GraphRelationKind = serde_json::from_str(&encoded).unwrap();
+
+        assert_eq!(decoded, relation);
     }
 }

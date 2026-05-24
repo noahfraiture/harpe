@@ -6,8 +6,8 @@
 - Replace the first-pass token estimator with model/provider-specific tokenization.
 - Add model-aware context sizing presets.
 - Move memory extraction, summary updates, and embeddings to background jobs with retries.
-- Replace the early schemaless SurrealDB setup with versioned migrations.
-- Add DB-side vector indexes, full-text indexes, and graph relation tables.
+- Add DB-side vector indexes and full-text indexes once embedding dimensions/model choices settle.
+- Backfill richer graph relation edges from extraction batches, such as event-character, event-location, character-fact, and memory-fact links.
 - Add auth, user ownership, and game/session permissions.
 - Add deployment assets, config validation, graceful shutdown, and production observability.
 - Add backup/export workflows for campaigns.

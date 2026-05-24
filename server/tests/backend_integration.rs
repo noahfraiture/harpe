@@ -5,8 +5,8 @@ use harpe_server::api::grpc::HarpeGrpc;
 use harpe_server::db::surreal::SurrealStore;
 use harpe_server::domain::{
     ExtractedCharacterUpdate, ExtractedEvent, ExtractedLocation, ExtractedWorldFact,
-    MemoryExtraction, MessageRole, NewEvent, NewGame, NewMemoryChunk, NewMessage, NewSession,
-    UpsertCharacter, UpsertLocation, UpsertStorySummary, UpsertWorldFact,
+    GraphRelationKind, MemoryExtraction, MessageRole, NewEvent, NewGame, NewMemoryChunk,
+    NewMessage, NewSession, UpsertCharacter, UpsertLocation, UpsertStorySummary, UpsertWorldFact,
 };
 use harpe_server::llm::EchoLlm;
 use harpe_server::pb::game_service_client::GameServiceClient;
@@ -68,6 +68,22 @@ async fn surreal_store_round_trips_conversation_memory_and_characters() {
     assert_eq!(messages.len(), 2);
     assert_eq!(messages[0].role, MessageRole::User);
     assert_eq!(messages[1].role, MessageRole::Assistant);
+    assert_relation_targets(
+        &store,
+        GraphRelationKind::SessionInGame,
+        &session.id,
+        "game",
+        &game.id,
+    )
+    .await;
+    assert_relation_targets(
+        &store,
+        GraphRelationKind::MessageInSession,
+        &messages[0].id,
+        "session",
+        &session.id,
+    )
+    .await;
 
     store
         .upsert_story_summary(UpsertStorySummary {
@@ -91,6 +107,14 @@ async fn surreal_store_round_trips_conversation_memory_and_characters() {
         .unwrap();
     let characters = store.list_characters(&game.id).await.unwrap();
     assert_eq!(characters, vec![character]);
+    assert_relation_targets(
+        &store,
+        GraphRelationKind::CharacterInGame,
+        &characters[0].id,
+        "game",
+        &game.id,
+    )
+    .await;
 
     let event = store
         .save_event(NewEvent {
@@ -102,6 +126,14 @@ async fn surreal_store_round_trips_conversation_memory_and_characters() {
         .unwrap();
     let events = store.list_events(&session.id, 10).await.unwrap();
     assert_eq!(events, vec![event]);
+    assert_relation_targets(
+        &store,
+        GraphRelationKind::EventInSession,
+        &events[0].id,
+        "session",
+        &session.id,
+    )
+    .await;
 
     let location = store
         .upsert_location(UpsertLocation {
@@ -114,6 +146,14 @@ async fn surreal_store_round_trips_conversation_memory_and_characters() {
         .unwrap();
     let locations = store.list_locations(&game.id).await.unwrap();
     assert_eq!(locations, vec![location]);
+    assert_relation_targets(
+        &store,
+        GraphRelationKind::LocationInGame,
+        &locations[0].id,
+        "game",
+        &game.id,
+    )
+    .await;
 
     let fact = store
         .upsert_world_fact(UpsertWorldFact {
@@ -132,6 +172,14 @@ async fn surreal_store_round_trips_conversation_memory_and_characters() {
     assert_eq!(facts[0].id, fact.id);
     assert_eq!(facts[0].content, "silver key opens lower vault");
     assert_eq!(facts[0].confidence, 1.0);
+    assert_relation_targets(
+        &store,
+        GraphRelationKind::WorldFactInGame,
+        &facts[0].id,
+        "game",
+        &game.id,
+    )
+    .await;
 
     let saved = store
         .save_memory_chunk(NewMemoryChunk {
@@ -149,6 +197,41 @@ async fn surreal_store_round_trips_conversation_memory_and_characters() {
 
     assert_eq!(hits[0].chunk.id, saved.chunk.id);
     assert!(hits[0].score > 0.99);
+    assert_relation_targets(
+        &store,
+        GraphRelationKind::MemoryInSession,
+        &saved.chunk.id,
+        "session",
+        &session.id,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn surreal_migrations_are_versioned_and_idempotent() {
+    let store = test_store().await;
+
+    let first_run = store.applied_migrations().await.unwrap();
+    assert_eq!(
+        first_run
+            .iter()
+            .map(|migration| migration.version)
+            .collect::<Vec<_>>(),
+        SurrealStore::migration_versions()
+    );
+
+    store.migrate().await.unwrap();
+    store.migrate().await.unwrap();
+    let second_run = store.applied_migrations().await.unwrap();
+
+    assert_eq!(second_run.len(), first_run.len());
+    assert_eq!(
+        second_run
+            .iter()
+            .map(|migration| migration.version)
+            .collect::<Vec<_>>(),
+        SurrealStore::migration_versions()
+    );
 }
 
 #[tokio::test]
@@ -326,4 +409,26 @@ async fn test_store() -> SurrealStore {
     SurrealStore::connect("memory", &format!("test_{}", Uuid::now_v7()), "harpe")
         .await
         .unwrap()
+}
+
+async fn assert_relation_targets(
+    store: &SurrealStore,
+    relation: GraphRelationKind,
+    in_id: &str,
+    out_table: &str,
+    out_id: &str,
+) {
+    let edges = store.list_graph_edges(relation, in_id).await.unwrap();
+
+    assert_eq!(edges.len(), 1);
+    assert!(
+        edges[0].out_record.starts_with(&format!("{out_table}:")),
+        "unexpected out record: {}",
+        edges[0].out_record
+    );
+    assert!(
+        edges[0].out_record.contains(out_id),
+        "unexpected out record: {}",
+        edges[0].out_record
+    );
 }

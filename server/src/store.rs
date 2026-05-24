@@ -2,9 +2,9 @@ use async_trait::async_trait;
 
 use crate::Result;
 use crate::domain::{
-    Character, Event, Game, Location, MemoryHit, Message, NewEvent, NewGame, NewMemoryChunk,
-    NewMessage, NewSession, Session, StorySummary, UpsertCharacter, UpsertLocation,
-    UpsertStorySummary, UpsertWorldFact, WorldFact,
+    Character, Event, Game, GraphEdge, GraphRelationKind, Location, MemoryHit, Message, NewEvent,
+    NewGame, NewMemoryChunk, NewMessage, NewSession, Session, StorySummary, UpsertCharacter,
+    UpsertLocation, UpsertStorySummary, UpsertWorldFact, WorldFact,
 };
 
 #[async_trait]
@@ -34,6 +34,12 @@ pub trait HarpeStore: Send + Sync {
 
     async fn upsert_world_fact(&self, input: UpsertWorldFact) -> Result<WorldFact>;
     async fn list_world_facts(&self, game_id: &str, limit: usize) -> Result<Vec<WorldFact>>;
+
+    async fn list_graph_edges(
+        &self,
+        relation: GraphRelationKind,
+        in_record_id: &str,
+    ) -> Result<Vec<GraphEdge>>;
 
     async fn save_memory_chunk(&self, input: NewMemoryChunk) -> Result<MemoryHit>;
     async fn search_memory(
