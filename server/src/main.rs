@@ -6,6 +6,7 @@ use harpe_server::db::surreal::SurrealStore;
 use harpe_server::jobs::JobRunner;
 use harpe_server::llm::{EchoLlm, HttpLlm, LlmClient};
 use harpe_server::pb::game_service_server::GameServiceServer;
+use harpe_server::pb::health_service_server::HealthServiceServer;
 use harpe_server::pb::memory_service_server::MemoryServiceServer;
 use harpe_server::pb::session_service_server::SessionServiceServer;
 use harpe_server::pb::user_service_server::UserServiceServer;
@@ -42,6 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!(%addr, "starting harpe gRPC server");
 
     Server::builder()
+        .add_service(HealthServiceServer::new(service.clone()))
         .add_service(UserServiceServer::new(service.clone()))
         .add_service(GameServiceServer::new(service.clone()))
         .add_service(SessionServiceServer::new(service.clone()))

@@ -17,6 +17,8 @@ use crate::engine::cosine_similarity;
 use crate::store::HarpeStore;
 use crate::{HarpeError, Result};
 
+const INDEXED_EMBEDDING_DIMENSIONS: usize = 16;
+
 const MIGRATION_BOOTSTRAP: &str = r#"
 DEFINE TABLE OVERWRITE schema_migration SCHEMAFULL;
 DEFINE FIELD OVERWRITE uid ON schema_migration TYPE string;
@@ -195,6 +197,16 @@ DEFINE FIELD OVERWRITE owner_user_id ON game TYPE string DEFAULT "";
 UPDATE game SET owner_user_id = "" WHERE owner_user_id = NONE;
 DEFINE INDEX OVERWRITE game_owner_user_id ON game FIELDS owner_user_id;
 DEFINE INDEX OVERWRITE game_owner_created_at ON game FIELDS owner_user_id, created_at;
+"#,
+    },
+    Migration {
+        version: 5,
+        name: "indexed_memory_search",
+        sql: r#"
+DEFINE ANALYZER OVERWRITE memory_content_analyzer TOKENIZERS blank, class, camel, punct FILTERS lowercase, ascii;
+DEFINE FIELD OVERWRITE embedding_16 ON memory_chunk TYPE option<array<float>>;
+DEFINE INDEX OVERWRITE memory_chunk_content_fulltext ON TABLE memory_chunk FIELDS content FULLTEXT ANALYZER memory_content_analyzer BM25;
+DEFINE INDEX OVERWRITE memory_chunk_embedding_16_hnsw ON TABLE memory_chunk FIELDS embedding_16 HNSW DIMENSION 16 DIST COSINE TYPE F32;
 "#,
     },
 ];
@@ -892,6 +904,7 @@ impl HarpeStore for SurrealStore {
             session_id: input.session_id,
             kind: input.kind,
             content: input.content,
+            embedding_16: fixed_16_embedding(&input.embedding),
             embedding: input.embedding,
             created_at: Utc::now(),
         };
@@ -944,38 +957,70 @@ impl HarpeStore for SurrealStore {
         query_embedding: &[f32],
         limit: usize,
     ) -> Result<Vec<MemoryHit>> {
-        let mut response = self
-            .db
-            .query(
-                "SELECT * FROM memory_chunk WHERE session_id = $session_id ORDER BY created_at DESC LIMIT 200",
-            )
-            .bind(("session_id", session_id.to_owned()))
-            .await?;
-        let rows: Vec<MemoryChunkRow> = response.take(0)?;
-        let query = query.to_lowercase();
+        let limit = normalize_limit(limit);
+        let candidate_limit = memory_candidate_limit(limit);
+        let query = query.trim();
+        let mut candidates = Vec::new();
 
-        let mut hits = rows
-            .into_iter()
-            .map(|row| {
-                let vector_score = cosine_similarity(query_embedding, &row.embedding);
-                let lexical_score = lexical_score(&query, &row.content);
-                MemoryHit {
-                    chunk: row.into(),
-                    score: vector_score.max(lexical_score),
-                }
-            })
-            .filter(|hit| hit.score > 0.0 || query.is_empty())
-            .collect::<Vec<_>>();
+        if query_embedding.len() == INDEXED_EMBEDDING_DIMENSIONS {
+            let vector_query = format!(
+                "SELECT * FROM memory_chunk
+                 WHERE session_id = $session_id
+                   AND embedding_16 != NONE
+                   AND embedding_16 <|{candidate_limit},100|> $query_embedding
+                 LIMIT {candidate_limit}",
+            );
+            let mut response = self
+                .db
+                .query(vector_query)
+                .bind(("session_id", session_id.to_owned()))
+                .bind(("query_embedding", query_embedding.to_vec()))
+                .await?;
+            let rows: Vec<MemoryChunkRow> = response.take(0)?;
+            candidates.extend(rows.into_iter().map(Into::into));
+        }
 
-        hits.sort_by(|left, right| {
-            right
-                .score
-                .total_cmp(&left.score)
-                .then_with(|| right.chunk.created_at.cmp(&left.chunk.created_at))
-        });
-        hits.truncate(normalize_limit(limit));
+        if !query.is_empty() {
+            let mut response = self
+                .db
+                .query(
+                    "SELECT *, search::score(1) AS lexical_score
+                     FROM memory_chunk
+                     WHERE session_id = $session_id
+                       AND content @1@ $query
+                     ORDER BY lexical_score DESC
+                     LIMIT $candidate_limit",
+                )
+                .bind(("session_id", session_id.to_owned()))
+                .bind(("query", query.to_owned()))
+                .bind(("candidate_limit", candidate_limit as i64))
+                .await?;
+            let rows: Vec<MemorySearchRow> = response.take(0)?;
+            candidates.extend(rows.into_iter().map(Into::into));
+        }
 
-        Ok(hits)
+        if candidates.is_empty() {
+            let mut response = self
+                .db
+                .query(
+                    "SELECT * FROM memory_chunk
+                     WHERE session_id = $session_id
+                     ORDER BY created_at DESC
+                     LIMIT $candidate_limit",
+                )
+                .bind(("session_id", session_id.to_owned()))
+                .bind(("candidate_limit", candidate_limit as i64))
+                .await?;
+            let rows: Vec<MemoryChunkRow> = response.take(0)?;
+            candidates.extend(rows.into_iter().map(Into::into));
+        }
+
+        Ok(rank_memory_candidates(
+            candidates,
+            query,
+            query_embedding,
+            limit,
+        ))
     }
 }
 
@@ -1084,6 +1129,10 @@ fn normalize_limit(limit: usize) -> usize {
     }
 }
 
+fn memory_candidate_limit(limit: usize) -> usize {
+    normalize_limit(limit).saturating_mul(8).clamp(32, 512)
+}
+
 fn normalize_importance(importance: i32) -> i32 {
     importance.clamp(1, 5)
 }
@@ -1122,6 +1171,45 @@ fn lexical_score(query: &str, content: &str) -> f32 {
     let matches = terms.iter().filter(|term| content.contains(**term)).count();
 
     matches as f32 / terms.len() as f32
+}
+
+fn fixed_16_embedding(embedding: &[f32]) -> Option<Vec<f32>> {
+    (embedding.len() == INDEXED_EMBEDDING_DIMENSIONS).then(|| embedding.to_vec())
+}
+
+fn rank_memory_candidates(
+    candidates: Vec<MemorySearchCandidate>,
+    query: &str,
+    query_embedding: &[f32],
+    limit: usize,
+) -> Vec<MemoryHit> {
+    let mut hits = candidates
+        .into_iter()
+        .fold(Vec::<MemoryHit>::new(), |mut hits, candidate| {
+            let vector_score = cosine_similarity(query_embedding, &candidate.row.embedding);
+            let lexical_score = candidate
+                .lexical_score
+                .unwrap_or_else(|| lexical_score(&query.to_lowercase(), &candidate.row.content));
+            let score = vector_score.max(lexical_score);
+            let chunk: MemoryChunk = candidate.row.into();
+
+            if let Some(existing) = hits.iter_mut().find(|hit| hit.chunk.id == chunk.id) {
+                existing.score = existing.score.max(score);
+            } else if score > 0.0 || query.is_empty() {
+                hits.push(MemoryHit { chunk, score });
+            }
+
+            hits
+        });
+
+    hits.sort_by(|left, right| {
+        right
+            .score
+            .total_cmp(&left.score)
+            .then_with(|| right.chunk.created_at.cmp(&left.chunk.created_at))
+    });
+    hits.truncate(normalize_limit(limit));
+    hits
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, SurrealValue)]
@@ -1388,6 +1476,8 @@ struct MemoryChunkRow {
     session_id: String,
     kind: String,
     content: String,
+    #[serde(default)]
+    embedding_16: Option<Vec<f32>>,
     embedding: Vec<f32>,
     created_at: DateTime<Utc>,
 }
@@ -1401,6 +1491,52 @@ impl From<MemoryChunkRow> for MemoryChunk {
             content: value.content,
             embedding: value.embedding,
             created_at: value.created_at,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, SurrealValue)]
+struct MemorySearchRow {
+    uid: String,
+    session_id: String,
+    kind: String,
+    content: String,
+    #[serde(default)]
+    embedding_16: Option<Vec<f32>>,
+    embedding: Vec<f32>,
+    #[serde(default)]
+    lexical_score: Option<f32>,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug)]
+struct MemorySearchCandidate {
+    row: MemoryChunkRow,
+    lexical_score: Option<f32>,
+}
+
+impl From<MemoryChunkRow> for MemorySearchCandidate {
+    fn from(row: MemoryChunkRow) -> Self {
+        Self {
+            row,
+            lexical_score: None,
+        }
+    }
+}
+
+impl From<MemorySearchRow> for MemorySearchCandidate {
+    fn from(value: MemorySearchRow) -> Self {
+        Self {
+            row: MemoryChunkRow {
+                uid: value.uid,
+                session_id: value.session_id,
+                kind: value.kind,
+                content: value.content,
+                embedding_16: value.embedding_16,
+                embedding: value.embedding,
+                created_at: value.created_at,
+            },
+            lexical_score: value.lexical_score,
         }
     }
 }
@@ -1424,6 +1560,8 @@ mod tests {
         assert_eq!(normalize_limit(0), 50);
         assert_eq!(normalize_limit(10), 10);
         assert_eq!(normalize_limit(10_000), 1_000);
+        assert_eq!(memory_candidate_limit(1), 32);
+        assert_eq!(memory_candidate_limit(100), 512);
     }
 
     #[test]
@@ -1449,5 +1587,61 @@ mod tests {
             world_fact_content("silver key", "opens", "lower vault", "A custom fact."),
             "A custom fact."
         );
+    }
+
+    #[test]
+    fn fixed_embedding_is_only_populated_for_indexed_dimension() {
+        assert_eq!(fixed_16_embedding(&[1.0; 15]), None);
+        assert_eq!(fixed_16_embedding(&[1.0; 17]), None);
+        assert_eq!(fixed_16_embedding(&[1.0; 16]), Some(vec![1.0; 16]));
+    }
+
+    #[test]
+    fn memory_candidate_ranking_deduplicates_and_prefers_best_score() {
+        let now = Utc::now();
+        let rows = vec![
+            MemorySearchCandidate {
+                row: MemoryChunkRow {
+                    uid: "memory-1".to_owned(),
+                    session_id: "session-1".to_owned(),
+                    kind: "event".to_owned(),
+                    content: "The silver key opens the lower vault.".to_owned(),
+                    embedding_16: Some(vec![1.0; 16]),
+                    embedding: vec![1.0, 0.0],
+                    created_at: now,
+                },
+                lexical_score: Some(0.2),
+            },
+            MemorySearchCandidate {
+                row: MemoryChunkRow {
+                    uid: "memory-1".to_owned(),
+                    session_id: "session-1".to_owned(),
+                    kind: "event".to_owned(),
+                    content: "The silver key opens the lower vault.".to_owned(),
+                    embedding_16: Some(vec![1.0; 16]),
+                    embedding: vec![1.0, 0.0],
+                    created_at: now,
+                },
+                lexical_score: Some(0.9),
+            },
+            MemorySearchCandidate {
+                row: MemoryChunkRow {
+                    uid: "memory-2".to_owned(),
+                    session_id: "session-1".to_owned(),
+                    kind: "event".to_owned(),
+                    content: "Unrelated memory.".to_owned(),
+                    embedding_16: None,
+                    embedding: vec![0.0, 1.0],
+                    created_at: now,
+                },
+                lexical_score: Some(0.1),
+            },
+        ];
+
+        let hits = rank_memory_candidates(rows, "silver key", &[1.0, 0.0], 10);
+
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].chunk.id, "memory-1");
+        assert!((hits[0].score - 1.0).abs() < 0.001);
     }
 }

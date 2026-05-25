@@ -7,8 +7,9 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, metadata::MetadataMap};
 
 use crate::domain::{
-    Character, Event, Game, GameSnapshot, Location, MemoryChunk, MemoryHit, Message, MessageRole,
-    NewGame, NewMessage, NewSession, NewUser, Session, StorySummary, User, WorldFact, new_id,
+    Character, Event, Game, GameSnapshot, JobStatus, Location, MemoryChunk, MemoryHit, Message,
+    MessageRole, NewGame, NewMessage, NewSession, NewUser, Session, StorySummary, User, WorldFact,
+    new_id,
 };
 use crate::engine::{ContextBuilder, ContextInputs, estimate_tokens};
 use crate::jobs::{UpdateMemoryAfterTurnPayload, new_update_memory_job};
@@ -16,10 +17,11 @@ use crate::llm::{ChatRequest, LlmClient};
 use crate::pb::{
     self, ContextMessage, CreateGameRequest, CreateSessionRequest, CreateUserRequest,
     ExportGameRequest, GetCharacterRequest, GetGameRequest, GetSessionRequest,
-    GetStorySummaryRequest, GetUserRequest, ListCharactersRequest, ListEventsRequest,
-    ListGamesRequest, ListLocationsRequest, ListMessagesRequest, ListWorldFactsRequest,
-    MessageDelta, PreviewContextRequest, SearchMemoryRequest, SendMessageRequest,
-    game_service_server, memory_service_server, session_service_server, user_service_server,
+    GetStorySummaryRequest, GetUserRequest, HealthCheckRequest, ListCharactersRequest,
+    ListEventsRequest, ListGamesRequest, ListLocationsRequest, ListMessagesRequest,
+    ListWorldFactsRequest, MessageDelta, PreviewContextRequest, SearchMemoryRequest,
+    SendMessageRequest, game_service_server, health_service_server, memory_service_server,
+    session_service_server, user_service_server,
 };
 use crate::store::HarpeStore;
 use crate::{HarpeError, Result};
@@ -423,6 +425,19 @@ impl memory_service_server::MemoryService for HarpeGrpc {
     }
 }
 
+#[tonic::async_trait]
+impl health_service_server::HealthService for HarpeGrpc {
+    async fn check(
+        &self,
+        request: Request<HealthCheckRequest>,
+    ) -> std::result::Result<Response<pb::HealthCheckResponse>, Status> {
+        let service = normalize_health_service(&request.into_inner().service);
+        let response = health_response(self.store.as_ref(), service).await;
+
+        Ok(Response::new(response))
+    }
+}
+
 async fn run_send_message(
     request: SendMessageRequest,
     user_id: String,
@@ -621,6 +636,58 @@ async fn require_owned_game(store: &dyn HarpeStore, game_id: &str, user_id: &str
     }
 
     Err(HarpeError::PermissionDenied(format!("game {game_id}")))
+}
+
+async fn health_response(store: &dyn HarpeStore, service: String) -> pb::HealthCheckResponse {
+    let checked_at = Utc::now().to_rfc3339();
+    let health = async {
+        store.list_games(1).await?;
+        let pending_jobs = store
+            .list_jobs(Some(JobStatus::Pending), 1_000)
+            .await?
+            .len();
+        let failed_jobs = store.list_jobs(Some(JobStatus::Failed), 1_000).await?.len();
+        Result::Ok((pending_jobs, failed_jobs))
+    }
+    .await;
+
+    match health {
+        Ok((pending_jobs, failed_jobs)) => {
+            let status = if failed_jobs > 0 {
+                pb::ServingStatus::Degraded
+            } else {
+                pb::ServingStatus::Serving
+            };
+
+            pb::HealthCheckResponse {
+                status: status as i32,
+                service,
+                version: env!("CARGO_PKG_VERSION").to_owned(),
+                database_ok: true,
+                pending_jobs: saturating_u32(pending_jobs),
+                failed_jobs: saturating_u32(failed_jobs),
+                checked_at,
+            }
+        }
+        Err(error) => pb::HealthCheckResponse {
+            status: pb::ServingStatus::NotServing as i32,
+            service,
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            database_ok: false,
+            pending_jobs: 0,
+            failed_jobs: 0,
+            checked_at: format!("{checked_at}; error={error}"),
+        },
+    }
+}
+
+fn normalize_health_service(service: &str) -> String {
+    let service = service.trim();
+    if service.is_empty() {
+        "harpe.v1".to_owned()
+    } else {
+        service.to_owned()
+    }
 }
 
 fn limit_from_u32(limit: u32) -> usize {
@@ -855,5 +922,14 @@ mod tests {
         let status = status_from_error(HarpeError::PermissionDenied("game-1".to_owned()));
 
         assert_eq!(status.code(), tonic::Code::PermissionDenied);
+    }
+
+    #[test]
+    fn health_service_name_defaults_when_blank() {
+        assert_eq!(normalize_health_service(""), "harpe.v1");
+        assert_eq!(
+            normalize_health_service(" harpe.v1.MemoryService "),
+            "harpe.v1.MemoryService"
+        );
     }
 }

@@ -32,6 +32,10 @@ service MemoryService {
   rpc ExportGame(ExportGameRequest) returns (GameSnapshot);
 }
 
+service HealthService {
+  rpc Check(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
 message User {
   string id = 1;
   string display_name = 2;
@@ -265,4 +269,25 @@ message SearchMemoryResponse {
 
 message ExportGameRequest {
   string game_id = 1;
+}
+
+message HealthCheckRequest {
+  string service = 1;
+}
+
+enum ServingStatus {
+  SERVING_STATUS_UNSPECIFIED = 0;
+  SERVING_STATUS_SERVING = 1;
+  SERVING_STATUS_DEGRADED = 2;
+  SERVING_STATUS_NOT_SERVING = 3;
+}
+
+message HealthCheckResponse {
+  ServingStatus status = 1;
+  string service = 2;
+  string version = 3;
+  bool database_ok = 4;
+  uint32 pending_jobs = 5;
+  uint32 failed_jobs = 6;
+  string checked_at = 7;
 }

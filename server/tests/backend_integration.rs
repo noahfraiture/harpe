@@ -13,6 +13,8 @@ use harpe_server::jobs::JobRunner;
 use harpe_server::llm::EchoLlm;
 use harpe_server::pb::game_service_client::GameServiceClient;
 use harpe_server::pb::game_service_server::GameServiceServer;
+use harpe_server::pb::health_service_client::HealthServiceClient;
+use harpe_server::pb::health_service_server::HealthServiceServer;
 use harpe_server::pb::memory_service_client::MemoryServiceClient;
 use harpe_server::pb::memory_service_server::MemoryServiceServer;
 use harpe_server::pb::session_service_client::SessionServiceClient;
@@ -21,8 +23,8 @@ use harpe_server::pb::user_service_client::UserServiceClient;
 use harpe_server::pb::user_service_server::UserServiceServer;
 use harpe_server::pb::{
     CreateGameRequest, CreateSessionRequest, CreateUserRequest, ExportGameRequest, GetGameRequest,
-    GetStorySummaryRequest, ListMessagesRequest, ListWorldFactsRequest, PreviewContextRequest,
-    SearchMemoryRequest, SendMessageRequest,
+    GetStorySummaryRequest, HealthCheckRequest, ListMessagesRequest, ListWorldFactsRequest,
+    PreviewContextRequest, SearchMemoryRequest, SendMessageRequest,
 };
 use harpe_server::store::HarpeStore;
 use tokio::net::TcpListener;
@@ -225,8 +227,34 @@ async fn surreal_store_round_trips_conversation_memory_and_characters() {
     )
     .await;
 
+    let relevant_old_memory = store
+        .save_memory_chunk(NewMemoryChunk {
+            session_id: session.id.clone(),
+            kind: "lore".to_owned(),
+            content: "The violet comet unlocks the oldest seal.".to_owned(),
+            embedding: vec![0.0; 16],
+        })
+        .await
+        .unwrap();
+    for index in 0..250 {
+        store
+            .save_memory_chunk(NewMemoryChunk {
+                session_id: session.id.clone(),
+                kind: "noise".to_owned(),
+                content: format!("Routine camp note {index}."),
+                embedding: vec![0.0; 16],
+            })
+            .await
+            .unwrap();
+    }
+    let indexed_hits = store
+        .search_memory(&session.id, "violet comet", &[0.0; 16], 5)
+        .await
+        .unwrap();
+    assert_eq!(indexed_hits[0].chunk.id, relevant_old_memory.chunk.id);
+
     let chunks = store.list_memory_chunks(&session.id, 10).await.unwrap();
-    assert_eq!(chunks.len(), 1);
+    assert_eq!(chunks.len(), 10);
     assert_eq!(chunks[0].id, saved.chunk.id);
 
     let snapshot = store.export_game_snapshot(&game.id).await.unwrap();
@@ -237,7 +265,7 @@ async fn surreal_store_round_trips_conversation_memory_and_characters() {
     assert_eq!(snapshot.events.len(), 1);
     assert_eq!(snapshot.world_facts.len(), 1);
     assert_eq!(snapshot.locations.len(), 1);
-    assert_eq!(snapshot.memory_chunks.len(), 1);
+    assert_eq!(snapshot.memory_chunks.len(), 252);
 }
 
 #[tokio::test]
@@ -351,6 +379,7 @@ async fn grpc_send_message_streams_response_and_updates_memory() {
 
     let server = tokio::spawn(
         Server::builder()
+            .add_service(HealthServiceServer::new(service.clone()))
             .add_service(UserServiceServer::new(service.clone()))
             .add_service(GameServiceServer::new(service.clone()))
             .add_service(SessionServiceServer::new(service.clone()))
@@ -363,6 +392,47 @@ async fn grpc_send_message_streams_response_and_updates_memory() {
         .connect()
         .await
         .unwrap();
+
+    let health = HealthServiceClient::new(channel.clone())
+        .check(HealthCheckRequest {
+            service: String::new(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        health.status,
+        harpe_server::pb::ServingStatus::Serving as i32
+    );
+    assert!(health.database_ok);
+
+    store
+        .enqueue_job(NewBackgroundJob {
+            kind: JobKind::UpdateMemoryAfterTurn,
+            payload: serde_json::json!({"session_id": "failed-health-check-job"}),
+            max_attempts: 3,
+            run_after: None,
+        })
+        .await
+        .unwrap();
+    let failed_job = store.claim_next_job().await.unwrap().unwrap();
+    store
+        .fail_job(&failed_job.id, "test failure".to_owned())
+        .await
+        .unwrap();
+    let degraded_health = HealthServiceClient::new(channel.clone())
+        .check(HealthCheckRequest {
+            service: "harpe.v1.MemoryService".to_owned(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        degraded_health.status,
+        harpe_server::pb::ServingStatus::Degraded as i32
+    );
+    assert_eq!(degraded_health.failed_jobs, 1);
+    assert_eq!(degraded_health.service, "harpe.v1.MemoryService");
 
     let mut user_client = UserServiceClient::new(channel.clone());
     let user = user_client
