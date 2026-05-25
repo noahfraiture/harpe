@@ -1,11 +1,10 @@
-use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
 
 use harpe_server::api::grpc::HarpeGrpc;
+use harpe_server::config::{AppConfig, AppLlmConfig};
 use harpe_server::db::surreal::SurrealStore;
 use harpe_server::jobs::JobRunner;
-use harpe_server::llm::EchoLlm;
+use harpe_server::llm::{EchoLlm, HttpLlm, LlmClient};
 use harpe_server::pb::game_service_server::GameServiceServer;
 use harpe_server::pb::memory_service_server::MemoryServiceServer;
 use harpe_server::pb::session_service_server::SessionServiceServer;
@@ -22,22 +21,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
-    let addr = std::env::var("HARPE_GRPC_ADDR")
-        .unwrap_or_else(|_| "[::1]:50051".to_owned())
-        .parse::<SocketAddr>()?;
-    let surreal_endpoint =
-        std::env::var("SURREALDB_ENDPOINT").unwrap_or_else(|_| "memory".to_owned());
-    let surreal_namespace =
-        std::env::var("SURREALDB_NAMESPACE").unwrap_or_else(|_| "harpe".to_owned());
-    let surreal_database = std::env::var("SURREALDB_DATABASE").unwrap_or_else(|_| "dev".to_owned());
+    let config = AppConfig::from_env()?;
 
     let store = Arc::new(
-        SurrealStore::connect(surreal_endpoint, &surreal_namespace, &surreal_database).await?,
+        SurrealStore::connect(
+            config.surreal_endpoint,
+            &config.surreal_namespace,
+            &config.surreal_database,
+        )
+        .await?,
     );
-    let llm = Arc::new(EchoLlm::development_default());
+    let llm: Arc<dyn LlmClient> = match config.llm {
+        AppLlmConfig::Echo => Arc::new(EchoLlm::development_default()),
+        AppLlmConfig::Http(http_config) => Arc::new(HttpLlm::new(http_config)?),
+    };
     let service = HarpeGrpc::new(store.clone(), llm.clone());
-    let _job_worker = JobRunner::new(store, llm).spawn(Duration::from_secs(2), 25);
+    let _job_worker = JobRunner::new(store, llm).spawn(config.job_interval, config.job_batch_limit);
 
+    let addr = config.grpc_addr;
     info!(%addr, "starting harpe gRPC server");
 
     Server::builder()
@@ -45,8 +46,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_service(GameServiceServer::new(service.clone()))
         .add_service(SessionServiceServer::new(service.clone()))
         .add_service(MemoryServiceServer::new(service))
-        .serve(addr)
+        .serve_with_shutdown(addr, shutdown_signal())
         .await?;
 
     Ok(())
+}
+
+async fn shutdown_signal() {
+    if let Err(error) = tokio::signal::ctrl_c().await {
+        tracing::warn!(%error, "failed to listen for shutdown signal");
+    }
+
+    info!("shutdown signal received");
 }

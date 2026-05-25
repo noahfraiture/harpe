@@ -20,7 +20,7 @@ use harpe_server::pb::session_service_server::SessionServiceServer;
 use harpe_server::pb::user_service_client::UserServiceClient;
 use harpe_server::pb::user_service_server::UserServiceServer;
 use harpe_server::pb::{
-    CreateGameRequest, CreateSessionRequest, CreateUserRequest, GetGameRequest,
+    CreateGameRequest, CreateSessionRequest, CreateUserRequest, ExportGameRequest, GetGameRequest,
     GetStorySummaryRequest, ListMessagesRequest, ListWorldFactsRequest, PreviewContextRequest,
     SearchMemoryRequest, SendMessageRequest,
 };
@@ -224,6 +224,20 @@ async fn surreal_store_round_trips_conversation_memory_and_characters() {
         &session.id,
     )
     .await;
+
+    let chunks = store.list_memory_chunks(&session.id, 10).await.unwrap();
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(chunks[0].id, saved.chunk.id);
+
+    let snapshot = store.export_game_snapshot(&game.id).await.unwrap();
+    assert_eq!(snapshot.game.id, game.id);
+    assert_eq!(snapshot.sessions, vec![session.clone()]);
+    assert_eq!(snapshot.summaries.len(), 1);
+    assert_eq!(snapshot.characters.len(), 1);
+    assert_eq!(snapshot.events.len(), 1);
+    assert_eq!(snapshot.world_facts.len(), 1);
+    assert_eq!(snapshot.locations.len(), 1);
+    assert_eq!(snapshot.memory_chunks.len(), 1);
 }
 
 #[tokio::test]
@@ -567,6 +581,20 @@ async fn grpc_send_message_streams_response_and_updates_memory() {
         .into_inner()
         .hits;
     assert!(hits.iter().any(|hit| hit.kind == "world_fact"));
+
+    let snapshot = memory_client
+        .export_game(with_user(
+            ExportGameRequest {
+                game_id: game.id.clone(),
+            },
+            &user.id,
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(snapshot.game.unwrap().id, game.id);
+    assert_eq!(snapshot.sessions.len(), 1);
+    assert_eq!(snapshot.memory_chunks.len(), 5);
 
     server.abort();
 }

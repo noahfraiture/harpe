@@ -29,6 +29,7 @@ service MemoryService {
   rpc ListWorldFacts(ListWorldFactsRequest) returns (ListWorldFactsResponse);
   rpc ListLocations(ListLocationsRequest) returns (ListLocationsResponse);
   rpc SearchMemory(SearchMemoryRequest) returns (SearchMemoryResponse);
+  rpc ExportGame(ExportGameRequest) returns (GameSnapshot);
 }
 
 message User {
@@ -115,6 +116,27 @@ message MemoryHit {
   string kind = 3;
   string content = 4;
   float score = 5;
+}
+
+message MemoryChunk {
+  string id = 1;
+  string session_id = 2;
+  string kind = 3;
+  string content = 4;
+  repeated float embedding = 5;
+  string created_at = 6;
+}
+
+message GameSnapshot {
+  Game game = 1;
+  repeated Session sessions = 2;
+  repeated StorySummary summaries = 3;
+  repeated Character characters = 4;
+  repeated Event events = 5;
+  repeated WorldFact world_facts = 6;
+  repeated Location locations = 7;
+  repeated MemoryChunk memory_chunks = 8;
+  string exported_at = 9;
 }
 
 message CreateUserRequest {
@@ -239,4 +261,8 @@ message SearchMemoryRequest {
 
 message SearchMemoryResponse {
   repeated MemoryHit hits = 1;
+}
+
+message ExportGameRequest {
+  string game_id = 1;
 }

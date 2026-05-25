@@ -567,6 +567,23 @@ impl HarpeStore for SurrealStore {
         Ok(session)
     }
 
+    async fn list_sessions(&self, game_id: &str, limit: usize) -> Result<Vec<Session>> {
+        let mut response = self
+            .db
+            .query(
+                "SELECT * FROM session
+                 WHERE game_id = $game_id
+                 ORDER BY created_at ASC
+                 LIMIT $limit",
+            )
+            .bind(("game_id", game_id.to_owned()))
+            .bind(("limit", normalize_limit(limit) as i64))
+            .await?;
+        let rows: Vec<SessionRow> = response.take(0)?;
+
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
     async fn get_session(&self, session_id: &str) -> Result<Session> {
         let row: Option<SessionRow> = self.db.select(("session", session_id)).await?;
         row.map(Into::into)
@@ -903,6 +920,23 @@ impl HarpeStore for SurrealStore {
         Ok(hit)
     }
 
+    async fn list_memory_chunks(&self, session_id: &str, limit: usize) -> Result<Vec<MemoryChunk>> {
+        let mut response = self
+            .db
+            .query(
+                "SELECT * FROM memory_chunk
+                 WHERE session_id = $session_id
+                 ORDER BY created_at ASC
+                 LIMIT $limit",
+            )
+            .bind(("session_id", session_id.to_owned()))
+            .bind(("limit", normalize_limit(limit) as i64))
+            .await?;
+        let rows: Vec<MemoryChunkRow> = response.take(0)?;
+
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
     async fn search_memory(
         &self,
         session_id: &str,
@@ -1045,8 +1079,8 @@ fn sanitize_record_key(value: &str) -> String {
 fn normalize_limit(limit: usize) -> usize {
     match limit {
         0 => 50,
-        1..=100 => limit,
-        _ => 100,
+        1..=1_000 => limit,
+        _ => 1_000,
     }
 }
 
@@ -1389,7 +1423,7 @@ mod tests {
     fn limit_defaults_and_caps() {
         assert_eq!(normalize_limit(0), 50);
         assert_eq!(normalize_limit(10), 10);
-        assert_eq!(normalize_limit(1_000), 100);
+        assert_eq!(normalize_limit(10_000), 1_000);
     }
 
     #[test]

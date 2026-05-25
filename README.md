@@ -4,11 +4,14 @@ Backend for an LLM-assisted roleplay game app.
 
 The current milestone is a Rust gRPC server with:
 
-- generated protobuf API for games, sessions, messages, summaries, characters, and memory search
+- generated protobuf API for users, games, sessions, messages, summaries, characters, memory search, context preview, and game export
 - SurrealDB storage through the Rust SDK with versioned migrations, schemafull tables, and graph relation tables
-- an LLM abstraction with a deterministic development implementation
+- an LLM abstraction with a deterministic development implementation and an OpenAI-compatible HTTP adapter
 - structured memory extraction for events, character updates, world facts, and locations
 - a budget-aware context builder that ranks story summary, recent events, memories, character state, world facts, locations, and recent messages
+- durable background jobs for turn memory updates
+- `x-user-id` gRPC metadata checks for user-owned game/session data
+- typed config, graceful shutdown, Docker assets, and game snapshot export for backups
 - unit tests plus integration tests covering embedded SurrealDB, migration idempotence, graph edges, and a real gRPC client/server path
 
 ## Run
@@ -23,6 +26,24 @@ Defaults:
 - `SURREALDB_ENDPOINT=memory`
 - `SURREALDB_NAMESPACE=harpe`
 - `SURREALDB_DATABASE=dev`
+- `HARPE_LLM_PROVIDER=echo`
+- `HARPE_JOB_INTERVAL_MS=2000`
+- `HARPE_JOB_BATCH_LIMIT=25`
+
+For an OpenAI-compatible provider, set:
+
+- `HARPE_LLM_PROVIDER=http`
+- `HARPE_LLM_BASE_URL`
+- `HARPE_LLM_API_KEY` if the provider requires one
+- `HARPE_LLM_CHAT_MODEL`
+- `HARPE_LLM_EXTRACTION_MODEL`
+- `HARPE_LLM_EMBEDDING_MODEL`
+
+To run the server with SurrealDB:
+
+```sh
+docker compose up --build
+```
 
 ## Test
 

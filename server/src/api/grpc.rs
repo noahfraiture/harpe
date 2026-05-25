@@ -7,19 +7,19 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, metadata::MetadataMap};
 
 use crate::domain::{
-    Character, Event, Game, Location, MemoryHit, Message, MessageRole, NewGame, NewMessage,
-    NewSession, NewUser, Session, StorySummary, User, WorldFact, new_id,
+    Character, Event, Game, GameSnapshot, Location, MemoryChunk, MemoryHit, Message, MessageRole,
+    NewGame, NewMessage, NewSession, NewUser, Session, StorySummary, User, WorldFact, new_id,
 };
 use crate::engine::{ContextBuilder, ContextInputs, estimate_tokens};
 use crate::jobs::{UpdateMemoryAfterTurnPayload, new_update_memory_job};
 use crate::llm::{ChatRequest, LlmClient};
 use crate::pb::{
     self, ContextMessage, CreateGameRequest, CreateSessionRequest, CreateUserRequest,
-    GetCharacterRequest, GetGameRequest, GetSessionRequest, GetStorySummaryRequest, GetUserRequest,
-    ListCharactersRequest, ListEventsRequest, ListGamesRequest, ListLocationsRequest,
-    ListMessagesRequest, ListWorldFactsRequest, MessageDelta, PreviewContextRequest,
-    SearchMemoryRequest, SendMessageRequest, game_service_server, memory_service_server,
-    session_service_server, user_service_server,
+    ExportGameRequest, GetCharacterRequest, GetGameRequest, GetSessionRequest,
+    GetStorySummaryRequest, GetUserRequest, ListCharactersRequest, ListEventsRequest,
+    ListGamesRequest, ListLocationsRequest, ListMessagesRequest, ListWorldFactsRequest,
+    MessageDelta, PreviewContextRequest, SearchMemoryRequest, SendMessageRequest,
+    game_service_server, memory_service_server, session_service_server, user_service_server,
 };
 use crate::store::HarpeStore;
 use crate::{HarpeError, Result};
@@ -403,6 +403,24 @@ impl memory_service_server::MemoryService for HarpeGrpc {
 
         Ok(Response::new(pb::SearchMemoryResponse { hits }))
     }
+
+    async fn export_game(
+        &self,
+        request: Request<ExportGameRequest>,
+    ) -> std::result::Result<Response<pb::GameSnapshot>, Status> {
+        let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
+        let request = request.into_inner();
+        require_owned_game(self.store.as_ref(), &request.game_id, &user_id)
+            .await
+            .map_err(status_from_error)?;
+        let snapshot = self
+            .store
+            .export_game_snapshot(&request.game_id)
+            .await
+            .map_err(status_from_error)?;
+
+        Ok(Response::new(snapshot_to_pb(snapshot)))
+    }
 }
 
 async fn run_send_message(
@@ -715,6 +733,43 @@ fn memory_hit_to_pb(hit: MemoryHit) -> pb::MemoryHit {
         kind: hit.chunk.kind,
         content: hit.chunk.content,
         score: hit.score,
+    }
+}
+
+fn memory_chunk_to_pb(chunk: MemoryChunk) -> pb::MemoryChunk {
+    pb::MemoryChunk {
+        id: chunk.id,
+        session_id: chunk.session_id,
+        kind: chunk.kind,
+        content: chunk.content,
+        embedding: chunk.embedding,
+        created_at: chunk.created_at.to_rfc3339(),
+    }
+}
+
+fn snapshot_to_pb(snapshot: GameSnapshot) -> pb::GameSnapshot {
+    pb::GameSnapshot {
+        game: Some(game_to_pb(snapshot.game)),
+        sessions: snapshot.sessions.into_iter().map(session_to_pb).collect(),
+        summaries: snapshot.summaries.into_iter().map(summary_to_pb).collect(),
+        characters: snapshot
+            .characters
+            .into_iter()
+            .map(character_to_pb)
+            .collect(),
+        events: snapshot.events.into_iter().map(event_to_pb).collect(),
+        world_facts: snapshot
+            .world_facts
+            .into_iter()
+            .map(world_fact_to_pb)
+            .collect(),
+        locations: snapshot.locations.into_iter().map(location_to_pb).collect(),
+        memory_chunks: snapshot
+            .memory_chunks
+            .into_iter()
+            .map(memory_chunk_to_pb)
+            .collect(),
+        exported_at: snapshot.exported_at.to_rfc3339(),
     }
 }
 

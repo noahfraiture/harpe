@@ -1,0 +1,33 @@
+services:
+  surrealdb:
+    image: surrealdb/surrealdb:v3.0.5
+    command:
+      - start
+      - --user
+      - root
+      - --pass
+      - root
+      - rocksdb:/data/harpe.db
+    ports:
+      - "8000:8000"
+    volumes:
+      - surrealdb-data:/data
+
+  harpe-server:
+    build:
+      context: .
+    depends_on:
+      - surrealdb
+    environment:
+      HARPE_GRPC_ADDR: 0.0.0.0:50051
+      SURREALDB_ENDPOINT: ws://surrealdb:8000
+      SURREALDB_NAMESPACE: harpe
+      SURREALDB_DATABASE: dev
+      HARPE_LLM_PROVIDER: echo
+      HARPE_JOB_INTERVAL_MS: "2000"
+      HARPE_JOB_BATCH_LIMIT: "25"
+    ports:
+      - "50051:50051"
+
+volumes:
+  surrealdb-data:
