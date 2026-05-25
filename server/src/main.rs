@@ -9,6 +9,7 @@ use harpe_server::llm::EchoLlm;
 use harpe_server::pb::game_service_server::GameServiceServer;
 use harpe_server::pb::memory_service_server::MemoryServiceServer;
 use harpe_server::pb::session_service_server::SessionServiceServer;
+use harpe_server::pb::user_service_server::UserServiceServer;
 use tonic::transport::Server;
 use tracing::info;
 
@@ -40,6 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!(%addr, "starting harpe gRPC server");
 
     Server::builder()
+        .add_service(UserServiceServer::new(service.clone()))
         .add_service(GameServiceServer::new(service.clone()))
         .add_service(SessionServiceServer::new(service.clone()))
         .add_service(MemoryServiceServer::new(service))

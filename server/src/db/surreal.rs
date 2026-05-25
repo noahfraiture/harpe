@@ -10,8 +10,8 @@ use surrealdb::types::{RecordId, SurrealValue, ToSql};
 use crate::domain::{
     BackgroundJob, Character, Event, Game, GraphEdge, GraphRelationKind, JobKind, JobStatus,
     Location, MemoryChunk, MemoryHit, Message, MessageRole, NewBackgroundJob, NewEvent, NewGame,
-    NewMemoryChunk, NewMessage, NewSession, Session, StorySummary, UpsertCharacter, UpsertLocation,
-    UpsertStorySummary, UpsertWorldFact, WorldFact, new_id,
+    NewMemoryChunk, NewMessage, NewSession, NewUser, Session, StorySummary, UpsertCharacter,
+    UpsertLocation, UpsertStorySummary, UpsertWorldFact, User, WorldFact, new_id,
 };
 use crate::engine::cosine_similarity;
 use crate::store::HarpeStore;
@@ -181,6 +181,22 @@ DEFINE INDEX OVERWRITE background_job_status_run_after ON background_job FIELDS 
 DEFINE INDEX OVERWRITE background_job_status_created_at ON background_job FIELDS status, created_at;
 "#,
     },
+    Migration {
+        version: 4,
+        name: "user_ownership",
+        sql: r#"
+DEFINE TABLE OVERWRITE user_account SCHEMAFULL;
+DEFINE FIELD OVERWRITE uid ON user_account TYPE string;
+DEFINE FIELD OVERWRITE display_name ON user_account TYPE string;
+DEFINE FIELD OVERWRITE created_at ON user_account TYPE datetime;
+DEFINE INDEX OVERWRITE user_account_created_at ON user_account FIELDS created_at;
+
+DEFINE FIELD OVERWRITE owner_user_id ON game TYPE string DEFAULT "";
+UPDATE game SET owner_user_id = "" WHERE owner_user_id = NONE;
+DEFINE INDEX OVERWRITE game_owner_user_id ON game FIELDS owner_user_id;
+DEFINE INDEX OVERWRITE game_owner_created_at ON game FIELDS owner_user_id, created_at;
+"#,
+    },
 ];
 
 #[derive(Clone, Copy, Debug)]
@@ -341,11 +357,40 @@ impl SurrealStore {
 
 #[async_trait]
 impl HarpeStore for SurrealStore {
+    async fn create_user(&self, input: NewUser) -> Result<User> {
+        validate_present("display name", &input.display_name)?;
+
+        let row = UserRow {
+            uid: new_id(),
+            display_name: input.display_name,
+            created_at: Utc::now(),
+        };
+
+        let created: Option<UserRow> = self
+            .db
+            .create(("user_account", row.uid.as_str()))
+            .content(row)
+            .await?;
+
+        created
+            .map(Into::into)
+            .ok_or_else(|| HarpeError::Store("SurrealDB did not return created user".to_owned()))
+    }
+
+    async fn get_user(&self, user_id: &str) -> Result<User> {
+        let row: Option<UserRow> = self.db.select(("user_account", user_id)).await?;
+        row.map(Into::into)
+            .ok_or_else(|| HarpeError::NotFound(format!("user {user_id}")))
+    }
+
     async fn create_game(&self, input: NewGame) -> Result<Game> {
+        validate_present("owner user id", &input.owner_user_id)?;
         validate_present("game title", &input.title)?;
+        self.get_user(&input.owner_user_id).await?;
 
         let row = GameRow {
             uid: new_id(),
+            owner_user_id: input.owner_user_id,
             title: input.title,
             system_prompt: input.system_prompt,
             created_at: Utc::now(),
@@ -366,6 +411,23 @@ impl HarpeStore for SurrealStore {
         let mut response = self
             .db
             .query("SELECT * FROM game ORDER BY created_at DESC LIMIT $limit")
+            .bind(("limit", normalize_limit(limit) as i64))
+            .await?;
+        let rows: Vec<GameRow> = response.take(0)?;
+
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
+    async fn list_games_for_user(&self, owner_user_id: &str, limit: usize) -> Result<Vec<Game>> {
+        let mut response = self
+            .db
+            .query(
+                "SELECT * FROM game
+                 WHERE owner_user_id = $owner_user_id
+                 ORDER BY created_at DESC
+                 LIMIT $limit",
+            )
+            .bind(("owner_user_id", owner_user_id.to_owned()))
             .bind(("limit", normalize_limit(limit) as i64))
             .await?;
         let rows: Vec<GameRow> = response.take(0)?;
@@ -1047,8 +1109,26 @@ impl From<MigrationRow> for AppliedMigration {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, SurrealValue)]
+struct UserRow {
+    uid: String,
+    display_name: String,
+    created_at: DateTime<Utc>,
+}
+
+impl From<UserRow> for User {
+    fn from(value: UserRow) -> Self {
+        Self {
+            id: value.uid,
+            display_name: value.display_name,
+            created_at: value.created_at,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, SurrealValue)]
 struct GameRow {
     uid: String,
+    owner_user_id: String,
     title: String,
     system_prompt: String,
     created_at: DateTime<Utc>,
@@ -1058,6 +1138,7 @@ impl From<GameRow> for Game {
     fn from(value: GameRow) -> Self {
         Self {
             id: value.uid,
+            owner_user_id: value.owner_user_id,
             title: value.title,
             system_prompt: value.system_prompt,
             created_at: value.created_at,

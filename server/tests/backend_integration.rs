@@ -6,8 +6,8 @@ use harpe_server::db::surreal::SurrealStore;
 use harpe_server::domain::{
     ExtractedCharacterUpdate, ExtractedEvent, ExtractedLocation, ExtractedWorldFact,
     GraphRelationKind, JobKind, JobStatus, MemoryExtraction, MessageRole, NewBackgroundJob,
-    NewEvent, NewGame, NewMemoryChunk, NewMessage, NewSession, UpsertCharacter, UpsertLocation,
-    UpsertStorySummary, UpsertWorldFact,
+    NewEvent, NewGame, NewMemoryChunk, NewMessage, NewSession, NewUser, UpsertCharacter,
+    UpsertLocation, UpsertStorySummary, UpsertWorldFact,
 };
 use harpe_server::jobs::JobRunner;
 use harpe_server::llm::EchoLlm;
@@ -17,14 +17,19 @@ use harpe_server::pb::memory_service_client::MemoryServiceClient;
 use harpe_server::pb::memory_service_server::MemoryServiceServer;
 use harpe_server::pb::session_service_client::SessionServiceClient;
 use harpe_server::pb::session_service_server::SessionServiceServer;
+use harpe_server::pb::user_service_client::UserServiceClient;
+use harpe_server::pb::user_service_server::UserServiceServer;
 use harpe_server::pb::{
-    CreateGameRequest, CreateSessionRequest, GetStorySummaryRequest, ListMessagesRequest,
-    ListWorldFactsRequest, SearchMemoryRequest, SendMessageRequest,
+    CreateGameRequest, CreateSessionRequest, CreateUserRequest, GetGameRequest,
+    GetStorySummaryRequest, ListMessagesRequest, ListWorldFactsRequest, PreviewContextRequest,
+    SearchMemoryRequest, SendMessageRequest,
 };
 use harpe_server::store::HarpeStore;
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
+use tonic::metadata::MetadataValue;
 use tonic::transport::{Endpoint, Server};
+use tonic::{Code, Request};
 use uuid::Uuid;
 
 #[tokio::test]
@@ -32,13 +37,25 @@ async fn surreal_store_round_trips_conversation_memory_and_characters() {
     let store = test_store().await;
     store.migrate().await.unwrap();
 
+    let user = store
+        .create_user(NewUser {
+            display_name: "Noah".to_owned(),
+        })
+        .await
+        .unwrap();
     let game = store
         .create_game(NewGame {
+            owner_user_id: user.id.clone(),
             title: "Vaults of Glass".to_owned(),
             system_prompt: "Run a tense fantasy mystery.".to_owned(),
         })
         .await
         .unwrap();
+    assert_eq!(game.owner_user_id, user.id);
+    assert_eq!(
+        store.list_games_for_user(&user.id, 10).await.unwrap(),
+        vec![game.clone()]
+    );
     let session = store
         .create_session(NewSession {
             game_id: game.id.clone(),
@@ -320,6 +337,7 @@ async fn grpc_send_message_streams_response_and_updates_memory() {
 
     let server = tokio::spawn(
         Server::builder()
+            .add_service(UserServiceServer::new(service.clone()))
             .add_service(GameServiceServer::new(service.clone()))
             .add_service(SessionServiceServer::new(service.clone()))
             .add_service(MemoryServiceServer::new(service))
@@ -332,31 +350,88 @@ async fn grpc_send_message_streams_response_and_updates_memory() {
         .await
         .unwrap();
 
-    let mut game_client = GameServiceClient::new(channel.clone());
-    let game = game_client
-        .create_game(CreateGameRequest {
-            title: "Iron Coast".to_owned(),
-            system_prompt: "Run a coastal fantasy adventure.".to_owned(),
+    let mut user_client = UserServiceClient::new(channel.clone());
+    let user = user_client
+        .create_user(CreateUserRequest {
+            display_name: "Noah".to_owned(),
         })
         .await
         .unwrap()
         .into_inner();
+
+    let mut game_client = GameServiceClient::new(channel.clone());
+    let game = game_client
+        .create_game(with_user(
+            CreateGameRequest {
+                title: "Iron Coast".to_owned(),
+                system_prompt: "Run a coastal fantasy adventure.".to_owned(),
+                owner_user_id: String::new(),
+            },
+            &user.id,
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(game.owner_user_id, user.id);
+
+    let stranger = user_client
+        .create_user(CreateUserRequest {
+            display_name: "Kest".to_owned(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let denied = game_client
+        .get_game(with_user(
+            GetGameRequest {
+                game_id: game.id.clone(),
+            },
+            &stranger.id,
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(denied.code(), Code::PermissionDenied);
 
     let mut session_client = SessionServiceClient::new(channel.clone());
     let session = session_client
-        .create_session(CreateSessionRequest {
-            game_id: game.id.clone(),
-            title: "First watch".to_owned(),
-        })
+        .create_session(with_user(
+            CreateSessionRequest {
+                game_id: game.id.clone(),
+                title: "First watch".to_owned(),
+            },
+            &user.id,
+        ))
         .await
         .unwrap()
         .into_inner();
 
+    let preview = session_client
+        .preview_context(with_user(
+            PreviewContextRequest {
+                session_id: session.id.clone(),
+                content: "I lift the rusted latch.".to_owned(),
+            },
+            &user.id,
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(preview.estimated_tokens > 0);
+    assert!(
+        preview
+            .messages
+            .iter()
+            .any(|message| message.content.contains("I lift the rusted latch."))
+    );
+
     let mut stream = session_client
-        .send_message(SendMessageRequest {
-            session_id: session.id.clone(),
-            content: "I lift the rusted latch.".to_owned(),
-        })
+        .send_message(with_user(
+            SendMessageRequest {
+                session_id: session.id.clone(),
+                content: "I lift the rusted latch.".to_owned(),
+            },
+            &user.id,
+        ))
         .await
         .unwrap()
         .into_inner();
@@ -376,10 +451,13 @@ async fn grpc_send_message_streams_response_and_updates_memory() {
     assert!(saw_done);
 
     let messages = session_client
-        .list_messages(ListMessagesRequest {
-            session_id: session.id.clone(),
-            limit: 10,
-        })
+        .list_messages(with_user(
+            ListMessagesRequest {
+                session_id: session.id.clone(),
+                limit: 10,
+            },
+            &user.id,
+        ))
         .await
         .unwrap()
         .into_inner()
@@ -405,19 +483,25 @@ async fn grpc_send_message_streams_response_and_updates_memory() {
 
     let mut memory_client = MemoryServiceClient::new(channel);
     let summary = memory_client
-        .get_story_summary(GetStorySummaryRequest {
-            session_id: session.id.clone(),
-        })
+        .get_story_summary(with_user(
+            GetStorySummaryRequest {
+                session_id: session.id.clone(),
+            },
+            &user.id,
+        ))
         .await
         .unwrap()
         .into_inner();
     assert!(summary.content.contains("The gate opens."));
 
     let events = memory_client
-        .list_events(harpe_server::pb::ListEventsRequest {
-            session_id: summary.session_id.clone(),
-            limit: 10,
-        })
+        .list_events(with_user(
+            harpe_server::pb::ListEventsRequest {
+                session_id: summary.session_id.clone(),
+                limit: 10,
+            },
+            &user.id,
+        ))
         .await
         .unwrap()
         .into_inner()
@@ -426,9 +510,12 @@ async fn grpc_send_message_streams_response_and_updates_memory() {
     assert_eq!(events[0].summary, "The rusted sea gate opens.");
 
     let characters = memory_client
-        .list_characters(harpe_server::pb::ListCharactersRequest {
-            game_id: game.id.clone(),
-        })
+        .list_characters(with_user(
+            harpe_server::pb::ListCharactersRequest {
+                game_id: game.id.clone(),
+            },
+            &user.id,
+        ))
         .await
         .unwrap()
         .into_inner()
@@ -438,10 +525,13 @@ async fn grpc_send_message_streams_response_and_updates_memory() {
     assert_eq!(characters[0].status, "alert");
 
     let facts = memory_client
-        .list_world_facts(ListWorldFactsRequest {
-            game_id: game.id.clone(),
-            limit: 10,
-        })
+        .list_world_facts(with_user(
+            ListWorldFactsRequest {
+                game_id: game.id.clone(),
+                limit: 10,
+            },
+            &user.id,
+        ))
         .await
         .unwrap()
         .into_inner()
@@ -450,7 +540,12 @@ async fn grpc_send_message_streams_response_and_updates_memory() {
     assert_eq!(facts[0].content, "The sea gate guards Iron Coast harbor.");
 
     let locations = memory_client
-        .list_locations(harpe_server::pb::ListLocationsRequest { game_id: game.id })
+        .list_locations(with_user(
+            harpe_server::pb::ListLocationsRequest {
+                game_id: game.id.clone(),
+            },
+            &user.id,
+        ))
         .await
         .unwrap()
         .into_inner()
@@ -459,11 +554,14 @@ async fn grpc_send_message_streams_response_and_updates_memory() {
     assert_eq!(locations[0].name, "Iron Coast harbor");
 
     let hits = memory_client
-        .search_memory(SearchMemoryRequest {
-            session_id: summary.session_id,
-            query: "sea gate harbor".to_owned(),
-            limit: 10,
-        })
+        .search_memory(with_user(
+            SearchMemoryRequest {
+                session_id: summary.session_id,
+                query: "sea gate harbor".to_owned(),
+                limit: 10,
+            },
+            &user.id,
+        ))
         .await
         .unwrap()
         .into_inner()
@@ -477,6 +575,15 @@ async fn test_store() -> SurrealStore {
     SurrealStore::connect("memory", &format!("test_{}", Uuid::now_v7()), "harpe")
         .await
         .unwrap()
+}
+
+fn with_user<T>(message: T, user_id: &str) -> Request<T> {
+    let mut request = Request::new(message);
+    request.metadata_mut().insert(
+        "x-user-id",
+        MetadataValue::try_from(user_id).expect("test user id is valid metadata"),
+    );
+    request
 }
 
 async fn assert_relation_targets(

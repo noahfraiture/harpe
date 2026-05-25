@@ -4,14 +4,18 @@ use crate::Result;
 use crate::domain::{
     BackgroundJob, Character, Event, Game, GraphEdge, GraphRelationKind, JobStatus, Location,
     MemoryHit, Message, NewBackgroundJob, NewEvent, NewGame, NewMemoryChunk, NewMessage,
-    NewSession, Session, StorySummary, UpsertCharacter, UpsertLocation, UpsertStorySummary,
-    UpsertWorldFact, WorldFact,
+    NewSession, NewUser, Session, StorySummary, UpsertCharacter, UpsertLocation,
+    UpsertStorySummary, UpsertWorldFact, User, WorldFact,
 };
 
 #[async_trait]
 pub trait HarpeStore: Send + Sync {
+    async fn create_user(&self, input: NewUser) -> Result<User>;
+    async fn get_user(&self, user_id: &str) -> Result<User>;
+
     async fn create_game(&self, input: NewGame) -> Result<Game>;
     async fn list_games(&self, limit: usize) -> Result<Vec<Game>>;
+    async fn list_games_for_user(&self, owner_user_id: &str, limit: usize) -> Result<Vec<Game>>;
     async fn get_game(&self, game_id: &str) -> Result<Game>;
 
     async fn enqueue_job(&self, input: NewBackgroundJob) -> Result<BackgroundJob>;

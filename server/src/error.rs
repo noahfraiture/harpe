@@ -10,6 +10,9 @@ pub enum HarpeError {
     #[error("not found: {0}")]
     NotFound(String),
 
+    #[error("permission denied: {0}")]
+    PermissionDenied(String),
+
     #[error("store error: {0}")]
     Store(String),
 

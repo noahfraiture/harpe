@@ -8,8 +8,21 @@ pub fn new_id() -> String {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct User {
+    pub id: String,
+    pub display_name: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NewUser {
+    pub display_name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Game {
     pub id: String,
+    pub owner_user_id: String,
     pub title: String,
     pub system_prompt: String,
     pub created_at: DateTime<Utc>,
@@ -17,6 +30,7 @@ pub struct Game {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NewGame {
+    pub owner_user_id: String,
     pub title: String,
     pub system_prompt: String,
 }

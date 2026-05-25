@@ -1,23 +1,25 @@
 use std::sync::Arc;
 
+use chrono::Utc;
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
-use tonic::{Request, Response, Status};
+use tonic::{Request, Response, Status, metadata::MetadataMap};
 
 use crate::domain::{
     Character, Event, Game, Location, MemoryHit, Message, MessageRole, NewGame, NewMessage,
-    NewSession, Session, StorySummary, WorldFact, new_id,
+    NewSession, NewUser, Session, StorySummary, User, WorldFact, new_id,
 };
-use crate::engine::{ContextBuilder, ContextInputs};
+use crate::engine::{ContextBuilder, ContextInputs, estimate_tokens};
 use crate::jobs::{UpdateMemoryAfterTurnPayload, new_update_memory_job};
-use crate::llm::LlmClient;
+use crate::llm::{ChatRequest, LlmClient};
 use crate::pb::{
-    self, CreateGameRequest, CreateSessionRequest, GetCharacterRequest, GetGameRequest,
-    GetSessionRequest, GetStorySummaryRequest, ListCharactersRequest, ListEventsRequest,
-    ListGamesRequest, ListLocationsRequest, ListMessagesRequest, ListWorldFactsRequest,
-    MessageDelta, SearchMemoryRequest, SendMessageRequest, game_service_server,
-    memory_service_server, session_service_server,
+    self, ContextMessage, CreateGameRequest, CreateSessionRequest, CreateUserRequest,
+    GetCharacterRequest, GetGameRequest, GetSessionRequest, GetStorySummaryRequest, GetUserRequest,
+    ListCharactersRequest, ListEventsRequest, ListGamesRequest, ListLocationsRequest,
+    ListMessagesRequest, ListWorldFactsRequest, MessageDelta, PreviewContextRequest,
+    SearchMemoryRequest, SendMessageRequest, game_service_server, memory_service_server,
+    session_service_server, user_service_server,
 };
 use crate::store::HarpeStore;
 use crate::{HarpeError, Result};
@@ -45,15 +47,52 @@ impl HarpeGrpc {
 }
 
 #[tonic::async_trait]
+impl user_service_server::UserService for HarpeGrpc {
+    async fn create_user(
+        &self,
+        request: Request<CreateUserRequest>,
+    ) -> std::result::Result<Response<pb::User>, Status> {
+        let request = request.into_inner();
+        let user = self
+            .store
+            .create_user(NewUser {
+                display_name: request.display_name,
+            })
+            .await
+            .map_err(status_from_error)?;
+
+        Ok(Response::new(user_to_pb(user)))
+    }
+
+    async fn get_user(
+        &self,
+        request: Request<GetUserRequest>,
+    ) -> std::result::Result<Response<pb::User>, Status> {
+        let user = self
+            .store
+            .get_user(&request.into_inner().user_id)
+            .await
+            .map_err(status_from_error)?;
+
+        Ok(Response::new(user_to_pb(user)))
+    }
+}
+
+#[tonic::async_trait]
 impl game_service_server::GameService for HarpeGrpc {
     async fn create_game(
         &self,
         request: Request<CreateGameRequest>,
     ) -> std::result::Result<Response<pb::Game>, Status> {
+        let metadata_user_id = optional_user_id(request.metadata()).map_err(status_from_error)?;
         let request = request.into_inner();
+        let owner_user_id =
+            resolve_owner_user_id(metadata_user_id.as_deref(), &request.owner_user_id)
+                .map_err(status_from_error)?;
         let game = self
             .store
             .create_game(NewGame {
+                owner_user_id,
                 title: request.title,
                 system_prompt: request.system_prompt,
             })
@@ -67,9 +106,10 @@ impl game_service_server::GameService for HarpeGrpc {
         &self,
         request: Request<ListGamesRequest>,
     ) -> std::result::Result<Response<pb::ListGamesResponse>, Status> {
+        let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let games = self
             .store
-            .list_games(limit_from_u32(request.into_inner().limit))
+            .list_games_for_user(&user_id, limit_from_u32(request.into_inner().limit))
             .await
             .map_err(status_from_error)?
             .into_iter()
@@ -83,9 +123,9 @@ impl game_service_server::GameService for HarpeGrpc {
         &self,
         request: Request<GetGameRequest>,
     ) -> std::result::Result<Response<pb::Game>, Status> {
-        let game = self
-            .store
-            .get_game(&request.into_inner().game_id)
+        let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
+        let game_id = request.into_inner().game_id;
+        let game = require_owned_game(self.store.as_ref(), &game_id, &user_id)
             .await
             .map_err(status_from_error)?;
 
@@ -101,7 +141,11 @@ impl session_service_server::SessionService for HarpeGrpc {
         &self,
         request: Request<CreateSessionRequest>,
     ) -> std::result::Result<Response<pb::Session>, Status> {
+        let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let request = request.into_inner();
+        require_owned_game(self.store.as_ref(), &request.game_id, &user_id)
+            .await
+            .map_err(status_from_error)?;
         let session = self
             .store
             .create_session(NewSession {
@@ -118,9 +162,9 @@ impl session_service_server::SessionService for HarpeGrpc {
         &self,
         request: Request<GetSessionRequest>,
     ) -> std::result::Result<Response<pb::Session>, Status> {
-        let session = self
-            .store
-            .get_session(&request.into_inner().session_id)
+        let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
+        let session_id = request.into_inner().session_id;
+        let session = require_owned_session(self.store.as_ref(), &session_id, &user_id)
             .await
             .map_err(status_from_error)?;
 
@@ -131,6 +175,7 @@ impl session_service_server::SessionService for HarpeGrpc {
         &self,
         request: Request<SendMessageRequest>,
     ) -> std::result::Result<Response<Self::SendMessageStream>, Status> {
+        let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let request = request.into_inner();
         let store = Arc::clone(&self.store);
         let llm = Arc::clone(&self.llm);
@@ -139,7 +184,7 @@ impl session_service_server::SessionService for HarpeGrpc {
 
         tokio::spawn(async move {
             if let Err(error) =
-                run_send_message(request, store, llm, context_builder, tx.clone()).await
+                run_send_message(request, user_id, store, llm, context_builder, tx.clone()).await
             {
                 let _ = tx.send(Err(status_from_error(error))).await;
             }
@@ -148,11 +193,51 @@ impl session_service_server::SessionService for HarpeGrpc {
         Ok(Response::new(ReceiverStream::new(rx)))
     }
 
+    async fn preview_context(
+        &self,
+        request: Request<PreviewContextRequest>,
+    ) -> std::result::Result<Response<pb::PreviewContextResponse>, Status> {
+        let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
+        let request = request.into_inner();
+        if request.content.trim().is_empty() {
+            return Err(status_from_error(HarpeError::Validation(
+                "message content is required".to_owned(),
+            )));
+        }
+
+        let session = require_owned_session(self.store.as_ref(), &request.session_id, &user_id)
+            .await
+            .map_err(status_from_error)?;
+        let game = self
+            .store
+            .get_game(&session.game_id)
+            .await
+            .map_err(status_from_error)?;
+        let chat_request = build_context_for_turn(
+            &session,
+            &game,
+            &request.content,
+            true,
+            self.store.as_ref(),
+            self.llm.as_ref(),
+            &self.context_builder,
+        )
+        .await
+        .map_err(status_from_error)?;
+        let response = preview_context_to_pb(chat_request);
+
+        Ok(Response::new(response))
+    }
+
     async fn list_messages(
         &self,
         request: Request<ListMessagesRequest>,
     ) -> std::result::Result<Response<pb::ListMessagesResponse>, Status> {
+        let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let request = request.into_inner();
+        require_owned_session(self.store.as_ref(), &request.session_id, &user_id)
+            .await
+            .map_err(status_from_error)?;
         let messages = self
             .store
             .list_recent_messages(&request.session_id, limit_from_u32(request.limit))
@@ -172,7 +257,11 @@ impl memory_service_server::MemoryService for HarpeGrpc {
         &self,
         request: Request<GetStorySummaryRequest>,
     ) -> std::result::Result<Response<pb::StorySummary>, Status> {
+        let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let request = request.into_inner();
+        require_owned_session(self.store.as_ref(), &request.session_id, &user_id)
+            .await
+            .map_err(status_from_error)?;
         let summary = self
             .store
             .get_story_summary(&request.session_id)
@@ -187,9 +276,14 @@ impl memory_service_server::MemoryService for HarpeGrpc {
         &self,
         request: Request<ListCharactersRequest>,
     ) -> std::result::Result<Response<pb::ListCharactersResponse>, Status> {
+        let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
+        let request = request.into_inner();
+        require_owned_game(self.store.as_ref(), &request.game_id, &user_id)
+            .await
+            .map_err(status_from_error)?;
         let characters = self
             .store
-            .list_characters(&request.into_inner().game_id)
+            .list_characters(&request.game_id)
             .await
             .map_err(status_from_error)?
             .into_iter()
@@ -203,9 +297,13 @@ impl memory_service_server::MemoryService for HarpeGrpc {
         &self,
         request: Request<GetCharacterRequest>,
     ) -> std::result::Result<Response<pb::Character>, Status> {
+        let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let character = self
             .store
             .get_character(&request.into_inner().character_id)
+            .await
+            .map_err(status_from_error)?;
+        require_owned_game(self.store.as_ref(), &character.game_id, &user_id)
             .await
             .map_err(status_from_error)?;
 
@@ -216,7 +314,11 @@ impl memory_service_server::MemoryService for HarpeGrpc {
         &self,
         request: Request<ListEventsRequest>,
     ) -> std::result::Result<Response<pb::ListEventsResponse>, Status> {
+        let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let request = request.into_inner();
+        require_owned_session(self.store.as_ref(), &request.session_id, &user_id)
+            .await
+            .map_err(status_from_error)?;
         let events = self
             .store
             .list_events(&request.session_id, limit_from_u32(request.limit))
@@ -233,7 +335,11 @@ impl memory_service_server::MemoryService for HarpeGrpc {
         &self,
         request: Request<ListWorldFactsRequest>,
     ) -> std::result::Result<Response<pb::ListWorldFactsResponse>, Status> {
+        let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let request = request.into_inner();
+        require_owned_game(self.store.as_ref(), &request.game_id, &user_id)
+            .await
+            .map_err(status_from_error)?;
         let facts = self
             .store
             .list_world_facts(&request.game_id, limit_from_u32(request.limit))
@@ -250,9 +356,14 @@ impl memory_service_server::MemoryService for HarpeGrpc {
         &self,
         request: Request<ListLocationsRequest>,
     ) -> std::result::Result<Response<pb::ListLocationsResponse>, Status> {
+        let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
+        let request = request.into_inner();
+        require_owned_game(self.store.as_ref(), &request.game_id, &user_id)
+            .await
+            .map_err(status_from_error)?;
         let locations = self
             .store
-            .list_locations(&request.into_inner().game_id)
+            .list_locations(&request.game_id)
             .await
             .map_err(status_from_error)?
             .into_iter()
@@ -266,7 +377,11 @@ impl memory_service_server::MemoryService for HarpeGrpc {
         &self,
         request: Request<SearchMemoryRequest>,
     ) -> std::result::Result<Response<pb::SearchMemoryResponse>, Status> {
+        let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let request = request.into_inner();
+        require_owned_session(self.store.as_ref(), &request.session_id, &user_id)
+            .await
+            .map_err(status_from_error)?;
         let embedding = self
             .llm
             .embed(&request.query)
@@ -292,6 +407,7 @@ impl memory_service_server::MemoryService for HarpeGrpc {
 
 async fn run_send_message(
     request: SendMessageRequest,
+    user_id: String,
     store: Arc<dyn HarpeStore>,
     llm: Arc<dyn LlmClient>,
     context_builder: ContextBuilder,
@@ -303,7 +419,7 @@ async fn run_send_message(
         ));
     }
 
-    let session = store.get_session(&request.session_id).await?;
+    let session = require_owned_session(store.as_ref(), &request.session_id, &user_id).await?;
     let game = store.get_game(&session.game_id).await?;
 
     store
@@ -315,33 +431,16 @@ async fn run_send_message(
         })
         .await?;
 
-    let query_embedding = llm.embed(&request.content).await?;
-    let summary = store.get_story_summary(&session.id).await?;
-    let recent_events = store.list_events(&session.id, 12).await?;
-    let memories = store
-        .search_memory(
-            &session.id,
-            &request.content,
-            &query_embedding,
-            context_builder.memory_limit,
-        )
-        .await?;
-    let characters = store.list_characters(&game.id).await?;
-    let world_facts = store.list_world_facts(&game.id, 24).await?;
-    let locations = store.list_locations(&game.id).await?;
-    let recent_messages = store
-        .list_recent_messages(&session.id, context_builder.recent_message_limit)
-        .await?;
-    let chat_request = context_builder.build(ContextInputs {
-        base_system_prompt: game.system_prompt,
-        summary: summary.clone(),
-        recent_events,
-        memories,
-        characters,
-        world_facts,
-        locations,
-        recent_messages,
-    });
+    let chat_request = build_context_for_turn(
+        &session,
+        &game,
+        &request.content,
+        false,
+        store.as_ref(),
+        llm.as_ref(),
+        &context_builder,
+    )
+    .await?;
 
     let assistant_id = new_id();
     let mut response_stream = llm.stream_chat(chat_request).await?;
@@ -399,6 +498,113 @@ async fn run_send_message(
     Ok(())
 }
 
+async fn build_context_for_turn(
+    session: &Session,
+    game: &Game,
+    user_content: &str,
+    include_ephemeral_user_message: bool,
+    store: &dyn HarpeStore,
+    llm: &dyn LlmClient,
+    context_builder: &ContextBuilder,
+) -> Result<ChatRequest> {
+    let query_embedding = llm.embed(user_content).await?;
+    let summary = store.get_story_summary(&session.id).await?;
+    let recent_events = store.list_events(&session.id, 12).await?;
+    let memories = store
+        .search_memory(
+            &session.id,
+            user_content,
+            &query_embedding,
+            context_builder.memory_limit,
+        )
+        .await?;
+    let characters = store.list_characters(&game.id).await?;
+    let world_facts = store.list_world_facts(&game.id, 24).await?;
+    let locations = store.list_locations(&game.id).await?;
+    let mut recent_messages = store
+        .list_recent_messages(&session.id, context_builder.recent_message_limit)
+        .await?;
+
+    if include_ephemeral_user_message {
+        recent_messages.push(Message {
+            id: String::new(),
+            session_id: session.id.clone(),
+            role: MessageRole::User,
+            content: user_content.to_owned(),
+            created_at: Utc::now(),
+        });
+    }
+
+    Ok(context_builder.build(ContextInputs {
+        base_system_prompt: game.system_prompt.clone(),
+        summary,
+        recent_events,
+        memories,
+        characters,
+        world_facts,
+        locations,
+        recent_messages,
+    }))
+}
+
+fn optional_user_id(metadata: &MetadataMap) -> Result<Option<String>> {
+    let Some(value) = metadata.get("x-user-id") else {
+        return Ok(None);
+    };
+
+    let value = value
+        .to_str()
+        .map_err(|_| HarpeError::PermissionDenied("x-user-id metadata is invalid".to_owned()))?
+        .trim()
+        .to_owned();
+
+    Ok((!value.is_empty()).then_some(value))
+}
+
+fn require_user_id(metadata: &MetadataMap) -> Result<String> {
+    optional_user_id(metadata)?
+        .ok_or_else(|| HarpeError::PermissionDenied("x-user-id metadata is required".to_owned()))
+}
+
+fn resolve_owner_user_id(
+    metadata_user_id: Option<&str>,
+    request_owner_user_id: &str,
+) -> Result<String> {
+    let request_owner_user_id = request_owner_user_id.trim();
+
+    match (metadata_user_id, request_owner_user_id.is_empty()) {
+        (Some(user_id), true) => Ok(user_id.to_owned()),
+        (Some(user_id), false) if user_id == request_owner_user_id => Ok(user_id.to_owned()),
+        (Some(_), false) => Err(HarpeError::PermissionDenied(
+            "owner_user_id must match x-user-id metadata".to_owned(),
+        )),
+        (None, false) => Ok(request_owner_user_id.to_owned()),
+        (None, true) => Err(HarpeError::PermissionDenied(
+            "owner_user_id or x-user-id metadata is required".to_owned(),
+        )),
+    }
+}
+
+async fn require_owned_session(
+    store: &dyn HarpeStore,
+    session_id: &str,
+    user_id: &str,
+) -> Result<Session> {
+    let session = store.get_session(session_id).await?;
+    require_owned_game(store, &session.game_id, user_id).await?;
+
+    Ok(session)
+}
+
+async fn require_owned_game(store: &dyn HarpeStore, game_id: &str, user_id: &str) -> Result<Game> {
+    let game = store.get_game(game_id).await?;
+    if game.owner_user_id == user_id {
+        return Ok(game);
+    }
+
+    Err(HarpeError::PermissionDenied(format!("game {game_id}")))
+}
+
 fn limit_from_u32(limit: u32) -> usize {
     usize::try_from(limit).unwrap_or(usize::MAX)
 }
@@ -407,8 +613,17 @@ fn status_from_error(error: HarpeError) -> Status {
     match error {
         HarpeError::Validation(message) => Status::invalid_argument(message),
         HarpeError::NotFound(message) => Status::not_found(message),
+        HarpeError::PermissionDenied(message) => Status::permission_denied(message),
         HarpeError::Store(message) => Status::internal(message),
         HarpeError::Llm(message) => Status::unavailable(message),
+    }
+}
+
+fn user_to_pb(user: User) -> pb::User {
+    pb::User {
+        id: user.id,
+        display_name: user.display_name,
+        created_at: user.created_at.to_rfc3339(),
     }
 }
 
@@ -418,6 +633,7 @@ fn game_to_pb(game: Game) -> pb::Game {
         title: game.title,
         system_prompt: game.system_prompt,
         created_at: game.created_at.to_rfc3339(),
+        owner_user_id: game.owner_user_id,
     }
 }
 
@@ -502,10 +718,87 @@ fn memory_hit_to_pb(hit: MemoryHit) -> pb::MemoryHit {
     }
 }
 
+fn preview_context_to_pb(chat_request: ChatRequest) -> pb::PreviewContextResponse {
+    let mut estimated_total = 0_usize;
+    let messages = chat_request
+        .messages
+        .into_iter()
+        .map(|message| {
+            let estimated = estimate_tokens(&message.content);
+            estimated_total = estimated_total.saturating_add(estimated);
+
+            ContextMessage {
+                role: role_to_pb(message.role),
+                content: message.content,
+                estimated_tokens: saturating_u32(estimated),
+            }
+        })
+        .collect();
+
+    pb::PreviewContextResponse {
+        messages,
+        estimated_tokens: saturating_u32(estimated_total),
+    }
+}
+
 fn role_to_pb(role: MessageRole) -> i32 {
     match role {
         MessageRole::System => pb::MessageRole::System as i32,
         MessageRole::User => pb::MessageRole::User as i32,
         MessageRole::Assistant => pb::MessageRole::Assistant as i32,
+    }
+}
+
+fn saturating_u32(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::llm::ChatMessage;
+
+    use super::*;
+
+    #[test]
+    fn owner_user_id_uses_metadata_and_rejects_mismatch() {
+        assert_eq!(resolve_owner_user_id(Some("user-1"), "").unwrap(), "user-1");
+        assert_eq!(
+            resolve_owner_user_id(Some("user-1"), "user-1").unwrap(),
+            "user-1"
+        );
+        assert_eq!(resolve_owner_user_id(None, "user-1").unwrap(), "user-1");
+
+        let mismatch = resolve_owner_user_id(Some("user-1"), "user-2").unwrap_err();
+        assert!(matches!(mismatch, HarpeError::PermissionDenied(_)));
+
+        let missing = resolve_owner_user_id(None, "").unwrap_err();
+        assert!(matches!(missing, HarpeError::PermissionDenied(_)));
+    }
+
+    #[test]
+    fn preview_context_response_includes_token_estimates() {
+        let response = preview_context_to_pb(ChatRequest {
+            messages: vec![
+                ChatMessage {
+                    role: MessageRole::System,
+                    content: "Trusted state.".to_owned(),
+                },
+                ChatMessage {
+                    role: MessageRole::User,
+                    content: "I open the gate.".to_owned(),
+                },
+            ],
+        });
+
+        assert_eq!(response.messages.len(), 2);
+        assert!(response.estimated_tokens >= response.messages[0].estimated_tokens);
+        assert_eq!(response.messages[1].role, pb::MessageRole::User as i32);
+    }
+
+    #[test]
+    fn permission_denied_maps_to_grpc_permission_denied() {
+        let status = status_from_error(HarpeError::PermissionDenied("game-1".to_owned()));
+
+        assert_eq!(status.code(), tonic::Code::PermissionDenied);
     }
 }
