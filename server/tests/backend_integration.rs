@@ -5,9 +5,11 @@ use harpe_server::api::grpc::HarpeGrpc;
 use harpe_server::db::surreal::SurrealStore;
 use harpe_server::domain::{
     ExtractedCharacterUpdate, ExtractedEvent, ExtractedLocation, ExtractedWorldFact,
-    GraphRelationKind, MemoryExtraction, MessageRole, NewEvent, NewGame, NewMemoryChunk,
-    NewMessage, NewSession, UpsertCharacter, UpsertLocation, UpsertStorySummary, UpsertWorldFact,
+    GraphRelationKind, JobKind, JobStatus, MemoryExtraction, MessageRole, NewBackgroundJob,
+    NewEvent, NewGame, NewMemoryChunk, NewMessage, NewSession, UpsertCharacter, UpsertLocation,
+    UpsertStorySummary, UpsertWorldFact,
 };
+use harpe_server::jobs::JobRunner;
 use harpe_server::llm::EchoLlm;
 use harpe_server::pb::game_service_client::GameServiceClient;
 use harpe_server::pb::game_service_server::GameServiceServer;
@@ -235,6 +237,55 @@ async fn surreal_migrations_are_versioned_and_idempotent() {
 }
 
 #[tokio::test]
+async fn surreal_store_claims_completes_and_fails_background_jobs() {
+    let store = test_store().await;
+
+    let job = store
+        .enqueue_job(NewBackgroundJob {
+            kind: JobKind::UpdateMemoryAfterTurn,
+            payload: serde_json::json!({"session_id": "session-1"}),
+            max_attempts: 0,
+            run_after: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(job.status, JobStatus::Pending);
+    assert_eq!(job.max_attempts, 1);
+
+    let pending = store.list_jobs(Some(JobStatus::Pending), 10).await.unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].id, job.id);
+
+    let claimed = store.claim_next_job().await.unwrap().unwrap();
+    assert_eq!(claimed.id, job.id);
+    assert_eq!(claimed.status, JobStatus::Running);
+    assert_eq!(claimed.attempts, 1);
+
+    let completed = store.complete_job(&claimed.id).await.unwrap();
+    assert_eq!(completed.status, JobStatus::Succeeded);
+    assert!(store.claim_next_job().await.unwrap().is_none());
+
+    store
+        .enqueue_job(NewBackgroundJob {
+            kind: JobKind::UpdateMemoryAfterTurn,
+            payload: serde_json::json!({"session_id": "session-2"}),
+            max_attempts: 3,
+            run_after: None,
+        })
+        .await
+        .unwrap();
+    let failing_job = store.claim_next_job().await.unwrap().unwrap();
+    let failed = store
+        .fail_job(&failing_job.id, "model timeout".to_owned())
+        .await
+        .unwrap();
+
+    assert_eq!(failed.id, failing_job.id);
+    assert_eq!(failed.status, JobStatus::Failed);
+    assert_eq!(failed.last_error.as_deref(), Some("model timeout"));
+}
+
+#[tokio::test]
 async fn grpc_send_message_streams_response_and_updates_memory() {
     let store = Arc::new(test_store().await);
     let llm = Arc::new(
@@ -263,7 +314,7 @@ async fn grpc_send_message_streams_response_and_updates_memory() {
             },
         ),
     );
-    let service = HarpeGrpc::new(store, llm);
+    let service = HarpeGrpc::new(store.clone(), llm.clone());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
 
@@ -335,10 +386,27 @@ async fn grpc_send_message_streams_response_and_updates_memory() {
         .messages;
     assert_eq!(messages.len(), 2);
 
+    assert!(
+        store
+            .get_story_summary(&session.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let jobs = store.list_jobs(Some(JobStatus::Pending), 10).await.unwrap();
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].kind, JobKind::UpdateMemoryAfterTurn);
+
+    let processed = JobRunner::new(store.clone(), llm)
+        .process_all_pending_jobs(10)
+        .await
+        .unwrap();
+    assert_eq!(processed, 1);
+
     let mut memory_client = MemoryServiceClient::new(channel);
     let summary = memory_client
         .get_story_summary(GetStorySummaryRequest {
-            session_id: session.id,
+            session_id: session.id.clone(),
         })
         .await
         .unwrap()

@@ -8,10 +8,10 @@ use surrealdb::engine::any::{self, Any};
 use surrealdb::types::{RecordId, SurrealValue, ToSql};
 
 use crate::domain::{
-    Character, Event, Game, GraphEdge, GraphRelationKind, Location, MemoryChunk, MemoryHit,
-    Message, MessageRole, NewEvent, NewGame, NewMemoryChunk, NewMessage, NewSession, Session,
-    StorySummary, UpsertCharacter, UpsertLocation, UpsertStorySummary, UpsertWorldFact, WorldFact,
-    new_id,
+    BackgroundJob, Character, Event, Game, GraphEdge, GraphRelationKind, JobKind, JobStatus,
+    Location, MemoryChunk, MemoryHit, Message, MessageRole, NewBackgroundJob, NewEvent, NewGame,
+    NewMemoryChunk, NewMessage, NewSession, Session, StorySummary, UpsertCharacter, UpsertLocation,
+    UpsertStorySummary, UpsertWorldFact, WorldFact, new_id,
 };
 use crate::engine::cosine_similarity;
 use crate::store::HarpeStore;
@@ -162,6 +162,25 @@ DEFINE FIELD OVERWRITE created_at ON memory_supports_world_fact TYPE datetime;
 DEFINE INDEX OVERWRITE memory_supports_world_fact_pair ON memory_supports_world_fact FIELDS in, out UNIQUE;
 "#,
     },
+    Migration {
+        version: 3,
+        name: "background_jobs",
+        sql: r#"
+DEFINE TABLE OVERWRITE background_job SCHEMAFULL;
+DEFINE FIELD OVERWRITE uid ON background_job TYPE string;
+DEFINE FIELD OVERWRITE kind ON background_job TYPE string;
+DEFINE FIELD OVERWRITE status ON background_job TYPE string;
+DEFINE FIELD OVERWRITE payload_json ON background_job TYPE string;
+DEFINE FIELD OVERWRITE attempts ON background_job TYPE int;
+DEFINE FIELD OVERWRITE max_attempts ON background_job TYPE int;
+DEFINE FIELD OVERWRITE last_error ON background_job TYPE option<string>;
+DEFINE FIELD OVERWRITE run_after ON background_job TYPE datetime;
+DEFINE FIELD OVERWRITE created_at ON background_job TYPE datetime;
+DEFINE FIELD OVERWRITE updated_at ON background_job TYPE datetime;
+DEFINE INDEX OVERWRITE background_job_status_run_after ON background_job FIELDS status, run_after;
+DEFINE INDEX OVERWRITE background_job_status_created_at ON background_job FIELDS status, created_at;
+"#,
+    },
 ];
 
 #[derive(Clone, Copy, Debug)]
@@ -286,6 +305,38 @@ impl SurrealStore {
 
         Ok(())
     }
+
+    async fn update_job_state(
+        &self,
+        job_id: &str,
+        status: JobStatus,
+        attempts: Option<i32>,
+        last_error: Option<String>,
+    ) -> Result<BackgroundJob> {
+        let mut row: JobRow = self
+            .db
+            .select(("background_job", job_id))
+            .await?
+            .ok_or_else(|| HarpeError::NotFound(format!("background job {job_id}")))?;
+
+        row.status = status.as_db_value().to_owned();
+        if let Some(attempts) = attempts {
+            row.attempts = attempts;
+        }
+        row.last_error = last_error;
+        row.updated_at = Utc::now();
+
+        let updated: Option<JobRow> = self
+            .db
+            .update(("background_job", row.uid.as_str()))
+            .content(row)
+            .await?;
+
+        updated
+            .map(TryInto::try_into)
+            .transpose()?
+            .ok_or_else(|| HarpeError::Store("SurrealDB did not return updated job".to_owned()))
+    }
 }
 
 #[async_trait]
@@ -326,6 +377,101 @@ impl HarpeStore for SurrealStore {
         let row: Option<GameRow> = self.db.select(("game", game_id)).await?;
         row.map(Into::into)
             .ok_or_else(|| HarpeError::NotFound(format!("game {game_id}")))
+    }
+
+    async fn enqueue_job(&self, input: NewBackgroundJob) -> Result<BackgroundJob> {
+        let now = Utc::now();
+        let row = JobRow {
+            uid: new_id(),
+            kind: input.kind.as_db_value().to_owned(),
+            status: JobStatus::Pending.as_db_value().to_owned(),
+            payload_json: serde_json::to_string(&input.payload)
+                .map_err(|error| HarpeError::Store(error.to_string()))?,
+            attempts: 0,
+            max_attempts: normalize_max_attempts(input.max_attempts),
+            last_error: None,
+            run_after: input.run_after.unwrap_or(now),
+            created_at: now,
+            updated_at: now,
+        };
+
+        let created: Option<JobRow> = self
+            .db
+            .create(("background_job", row.uid.as_str()))
+            .content(row)
+            .await?;
+
+        created
+            .map(TryInto::try_into)
+            .transpose()?
+            .ok_or_else(|| HarpeError::Store("SurrealDB did not return created job".to_owned()))
+    }
+
+    async fn list_jobs(
+        &self,
+        status: Option<JobStatus>,
+        limit: usize,
+    ) -> Result<Vec<BackgroundJob>> {
+        let rows: Vec<JobRow> = if let Some(status) = status {
+            let mut response = self
+                .db
+                .query(
+                    "SELECT * FROM background_job
+                     WHERE status = $status
+                     ORDER BY created_at DESC
+                     LIMIT $limit",
+                )
+                .bind(("status", status.as_db_value().to_owned()))
+                .bind(("limit", normalize_limit(limit) as i64))
+                .await?;
+            response.take(0)?
+        } else {
+            let mut response = self
+                .db
+                .query("SELECT * FROM background_job ORDER BY created_at DESC LIMIT $limit")
+                .bind(("limit", normalize_limit(limit) as i64))
+                .await?;
+            response.take(0)?
+        };
+
+        rows.into_iter().map(TryInto::try_into).collect()
+    }
+
+    async fn claim_next_job(&self) -> Result<Option<BackgroundJob>> {
+        let mut response = self
+            .db
+            .query(
+                "SELECT * FROM background_job
+                 WHERE status = $status AND run_after <= $now
+                 ORDER BY run_after ASC, created_at ASC
+                 LIMIT 1",
+            )
+            .bind(("status", JobStatus::Pending.as_db_value().to_owned()))
+            .bind(("now", Utc::now()))
+            .await?;
+        let rows: Vec<JobRow> = response.take(0)?;
+        let Some(row) = rows.into_iter().next() else {
+            return Ok(None);
+        };
+
+        self.update_job_state(
+            &row.uid,
+            JobStatus::Running,
+            Some(row.attempts.saturating_add(1)),
+            None,
+        )
+        .await
+        .map(Some)
+    }
+
+    async fn complete_job(&self, job_id: &str) -> Result<BackgroundJob> {
+        self.update_job_state(job_id, JobStatus::Succeeded, None, None)
+            .await
+    }
+
+    async fn fail_job(&self, job_id: &str, error: String) -> Result<BackgroundJob> {
+        self.update_job_state(job_id, JobStatus::Failed, None, Some(error))
+            .await
     }
 
     async fn create_session(&self, input: NewSession) -> Result<Session> {
@@ -846,6 +992,10 @@ fn normalize_importance(importance: i32) -> i32 {
     importance.clamp(1, 5)
 }
 
+fn normalize_max_attempts(max_attempts: i32) -> i32 {
+    max_attempts.clamp(1, 10)
+}
+
 fn normalize_confidence(confidence: f32) -> f32 {
     confidence.clamp(0.0, 1.0)
 }
@@ -912,6 +1062,46 @@ impl From<GameRow> for Game {
             system_prompt: value.system_prompt,
             created_at: value.created_at,
         }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, SurrealValue)]
+struct JobRow {
+    uid: String,
+    kind: String,
+    status: String,
+    payload_json: String,
+    attempts: i32,
+    max_attempts: i32,
+    last_error: Option<String>,
+    run_after: DateTime<Utc>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+impl TryFrom<JobRow> for BackgroundJob {
+    type Error = HarpeError;
+
+    fn try_from(value: JobRow) -> Result<Self> {
+        let kind = JobKind::from_db_value(&value.kind)
+            .ok_or_else(|| HarpeError::Store(format!("unknown job kind {}", value.kind)))?;
+        let status = JobStatus::from_db_value(&value.status)
+            .ok_or_else(|| HarpeError::Store(format!("unknown job status {}", value.status)))?;
+        let payload = serde_json::from_str(&value.payload_json)
+            .map_err(|error| HarpeError::Store(error.to_string()))?;
+
+        Ok(Self {
+            id: value.uid,
+            kind,
+            status,
+            payload,
+            attempts: value.attempts,
+            max_attempts: value.max_attempts,
+            last_error: value.last_error,
+            run_after: value.run_after,
+            created_at: value.created_at,
+            updated_at: value.updated_at,
+        })
     }
 }
 
@@ -1126,6 +1316,9 @@ mod tests {
         assert_eq!(normalize_importance(-1), 1);
         assert_eq!(normalize_importance(3), 3);
         assert_eq!(normalize_importance(9), 5);
+        assert_eq!(normalize_max_attempts(0), 1);
+        assert_eq!(normalize_max_attempts(3), 3);
+        assert_eq!(normalize_max_attempts(50), 10);
         assert_eq!(normalize_confidence(-0.5), 0.0);
         assert_eq!(normalize_confidence(0.75), 0.75);
         assert_eq!(normalize_confidence(2.0), 1.0);

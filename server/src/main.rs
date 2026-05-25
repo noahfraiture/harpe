@@ -1,8 +1,10 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use harpe_server::api::grpc::HarpeGrpc;
 use harpe_server::db::surreal::SurrealStore;
+use harpe_server::jobs::JobRunner;
 use harpe_server::llm::EchoLlm;
 use harpe_server::pb::game_service_server::GameServiceServer;
 use harpe_server::pb::memory_service_server::MemoryServiceServer;
@@ -32,7 +34,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         SurrealStore::connect(surreal_endpoint, &surreal_namespace, &surreal_database).await?,
     );
     let llm = Arc::new(EchoLlm::development_default());
-    let service = HarpeGrpc::new(store, llm);
+    let service = HarpeGrpc::new(store.clone(), llm.clone());
+    let _job_worker = JobRunner::new(store, llm).spawn(Duration::from_secs(2), 25);
 
     info!(%addr, "starting harpe gRPC server");
 

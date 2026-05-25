@@ -2,9 +2,10 @@ use async_trait::async_trait;
 
 use crate::Result;
 use crate::domain::{
-    Character, Event, Game, GraphEdge, GraphRelationKind, Location, MemoryHit, Message, NewEvent,
-    NewGame, NewMemoryChunk, NewMessage, NewSession, Session, StorySummary, UpsertCharacter,
-    UpsertLocation, UpsertStorySummary, UpsertWorldFact, WorldFact,
+    BackgroundJob, Character, Event, Game, GraphEdge, GraphRelationKind, JobStatus, Location,
+    MemoryHit, Message, NewBackgroundJob, NewEvent, NewGame, NewMemoryChunk, NewMessage,
+    NewSession, Session, StorySummary, UpsertCharacter, UpsertLocation, UpsertStorySummary,
+    UpsertWorldFact, WorldFact,
 };
 
 #[async_trait]
@@ -12,6 +13,16 @@ pub trait HarpeStore: Send + Sync {
     async fn create_game(&self, input: NewGame) -> Result<Game>;
     async fn list_games(&self, limit: usize) -> Result<Vec<Game>>;
     async fn get_game(&self, game_id: &str) -> Result<Game>;
+
+    async fn enqueue_job(&self, input: NewBackgroundJob) -> Result<BackgroundJob>;
+    async fn list_jobs(
+        &self,
+        status: Option<JobStatus>,
+        limit: usize,
+    ) -> Result<Vec<BackgroundJob>>;
+    async fn claim_next_job(&self) -> Result<Option<BackgroundJob>>;
+    async fn complete_job(&self, job_id: &str) -> Result<BackgroundJob>;
+    async fn fail_job(&self, job_id: &str, error: String) -> Result<BackgroundJob>;
 
     async fn create_session(&self, input: NewSession) -> Result<Session>;
     async fn get_session(&self, session_id: &str) -> Result<Session>;

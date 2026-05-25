@@ -6,12 +6,12 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
 use crate::domain::{
-    Character, Event, Game, Location, MemoryExtraction, MemoryHit, Message, MessageRole, NewEvent,
-    NewGame, NewMemoryChunk, NewMessage, NewSession, Session, StorySummary, UpsertCharacter,
-    UpsertLocation, UpsertStorySummary, UpsertWorldFact, WorldFact, new_id,
+    Character, Event, Game, Location, MemoryHit, Message, MessageRole, NewGame, NewMessage,
+    NewSession, Session, StorySummary, WorldFact, new_id,
 };
 use crate::engine::{ContextBuilder, ContextInputs};
-use crate::llm::{ExtractMemoryRequest, LlmClient, SummarizeRequest};
+use crate::jobs::{UpdateMemoryAfterTurnPayload, new_update_memory_job};
+use crate::llm::LlmClient;
 use crate::pb::{
     self, CreateGameRequest, CreateSessionRequest, GetCharacterRequest, GetGameRequest,
     GetSessionRequest, GetStorySummaryRequest, ListCharactersRequest, ListEventsRequest,
@@ -378,14 +378,14 @@ async fn run_send_message(
         })
         .await?;
 
-    update_memory_after_turn(
-        &session,
-        &game.id,
-        &assistant_content,
-        store.as_ref(),
-        llm.as_ref(),
-    )
-    .await?;
+    store
+        .enqueue_job(new_update_memory_job(UpdateMemoryAfterTurnPayload::new(
+            game.id,
+            session.id.clone(),
+            assistant_id.clone(),
+            assistant_content,
+        ))?)
+        .await?;
 
     let _ = tx
         .send(Ok(MessageDelta {
@@ -397,201 +397,6 @@ async fn run_send_message(
         .await;
 
     Ok(())
-}
-
-async fn update_memory_after_turn(
-    session: &Session,
-    game_id: &str,
-    assistant_content: &str,
-    store: &dyn HarpeStore,
-    llm: &dyn LlmClient,
-) -> Result<()> {
-    let previous_summary = store
-        .get_story_summary(&session.id)
-        .await?
-        .map(|summary| summary.content);
-    let recent_messages = store.list_recent_messages(&session.id, 24).await?;
-    let updated_summary = llm
-        .summarize(SummarizeRequest {
-            previous_summary,
-            messages: recent_messages.clone(),
-        })
-        .await?;
-
-    store
-        .upsert_story_summary(UpsertStorySummary {
-            session_id: session.id.clone(),
-            content: updated_summary,
-        })
-        .await?;
-
-    let embedding = llm.embed(assistant_content).await?;
-    store
-        .save_memory_chunk(NewMemoryChunk {
-            session_id: session.id.clone(),
-            kind: "turn".to_owned(),
-            content: assistant_content.to_owned(),
-            embedding,
-        })
-        .await?;
-
-    let extraction = llm
-        .extract_memory(ExtractMemoryRequest {
-            game_id: game_id.to_owned(),
-            session_id: session.id.clone(),
-            messages: recent_messages,
-        })
-        .await?;
-    persist_extraction(session, game_id, extraction, store, llm).await?;
-
-    Ok(())
-}
-
-async fn persist_extraction(
-    session: &Session,
-    game_id: &str,
-    extraction: MemoryExtraction,
-    store: &dyn HarpeStore,
-    llm: &dyn LlmClient,
-) -> Result<()> {
-    for event in extraction.events {
-        if event.summary.trim().is_empty() {
-            continue;
-        }
-
-        let event = store
-            .save_event(NewEvent {
-                session_id: session.id.clone(),
-                summary: event.summary,
-                importance: event.importance,
-            })
-            .await?;
-        save_embedded_memory(session, "event", event.summary.as_str(), store, llm).await?;
-    }
-
-    let existing_characters = store.list_characters(game_id).await?;
-    for character in extraction.character_updates {
-        if character.name.trim().is_empty() {
-            continue;
-        }
-
-        let existing_id = existing_characters
-            .iter()
-            .find(|existing| same_name(&existing.name, &character.name))
-            .map(|existing| existing.id.clone());
-        let character = store
-            .upsert_character(UpsertCharacter {
-                id: existing_id,
-                game_id: game_id.to_owned(),
-                name: character.name,
-                description: character.description,
-                status: character.status,
-            })
-            .await?;
-        save_embedded_memory(
-            session,
-            "character",
-            &format!(
-                "{} | status: {} | {}",
-                character.name, character.status, character.description
-            ),
-            store,
-            llm,
-        )
-        .await?;
-    }
-
-    let existing_facts = store.list_world_facts(game_id, 100).await?;
-    for fact in extraction.world_facts {
-        if fact.subject.trim().is_empty()
-            || fact.predicate.trim().is_empty()
-            || fact.object.trim().is_empty()
-        {
-            continue;
-        }
-
-        let existing_id = existing_facts
-            .iter()
-            .find(|existing| same_fact(existing, &fact.subject, &fact.predicate, &fact.object))
-            .map(|existing| existing.id.clone());
-        let fact = store
-            .upsert_world_fact(UpsertWorldFact {
-                id: existing_id,
-                game_id: game_id.to_owned(),
-                subject: fact.subject,
-                predicate: fact.predicate,
-                object: fact.object,
-                content: fact.content,
-                confidence: fact.confidence,
-            })
-            .await?;
-        save_embedded_memory(session, "world_fact", &fact.content, store, llm).await?;
-    }
-
-    let existing_locations = store.list_locations(game_id).await?;
-    for location in extraction.locations {
-        if location.name.trim().is_empty() {
-            continue;
-        }
-
-        let existing_id = existing_locations
-            .iter()
-            .find(|existing| same_name(&existing.name, &location.name))
-            .map(|existing| existing.id.clone());
-        let location = store
-            .upsert_location(UpsertLocation {
-                id: existing_id,
-                game_id: game_id.to_owned(),
-                name: location.name,
-                description: location.description,
-            })
-            .await?;
-        save_embedded_memory(
-            session,
-            "location",
-            &format!("{} | {}", location.name, location.description),
-            store,
-            llm,
-        )
-        .await?;
-    }
-
-    Ok(())
-}
-
-async fn save_embedded_memory(
-    session: &Session,
-    kind: &str,
-    content: &str,
-    store: &dyn HarpeStore,
-    llm: &dyn LlmClient,
-) -> Result<()> {
-    let content = content.trim();
-    if content.is_empty() {
-        return Ok(());
-    }
-
-    let embedding = llm.embed(content).await?;
-    store
-        .save_memory_chunk(NewMemoryChunk {
-            session_id: session.id.clone(),
-            kind: kind.to_owned(),
-            content: content.to_owned(),
-            embedding,
-        })
-        .await?;
-
-    Ok(())
-}
-
-fn same_name(left: &str, right: &str) -> bool {
-    left.trim().eq_ignore_ascii_case(right.trim())
-}
-
-fn same_fact(fact: &WorldFact, subject: &str, predicate: &str, object: &str) -> bool {
-    same_name(&fact.subject, subject)
-        && same_name(&fact.predicate, predicate)
-        && same_name(&fact.object, object)
 }
 
 fn limit_from_u32(limit: u32) -> usize {
