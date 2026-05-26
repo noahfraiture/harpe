@@ -14,14 +14,15 @@ use crate::domain::{
 use crate::engine::{ContextBuilder, ContextInputs, estimate_tokens};
 use crate::jobs::{UpdateMemoryAfterTurnPayload, new_update_memory_job};
 use crate::llm::{ChatRequest, LlmClient};
+use crate::observability::{AppMetrics, MetricsSnapshot as AppMetricsSnapshot, SharedMetrics};
 use crate::pb::{
     self, ContextMessage, CreateGameRequest, CreateSessionRequest, CreateUserRequest,
-    ExportGameRequest, GetCharacterRequest, GetGameRequest, GetSessionRequest,
+    ExportGameRequest, GetCharacterRequest, GetGameRequest, GetMetricsRequest, GetSessionRequest,
     GetStorySummaryRequest, GetUserRequest, HealthCheckRequest, ListCharactersRequest,
     ListEventsRequest, ListGamesRequest, ListLocationsRequest, ListMessagesRequest,
     ListWorldFactsRequest, MessageDelta, PreviewContextRequest, SearchMemoryRequest,
     SendMessageRequest, game_service_server, health_service_server, memory_service_server,
-    session_service_server, user_service_server,
+    metrics_service_server, session_service_server, user_service_server,
 };
 use crate::store::HarpeStore;
 use crate::{HarpeError, Result};
@@ -31,6 +32,7 @@ pub struct HarpeGrpc {
     store: Arc<dyn HarpeStore>,
     llm: Arc<dyn LlmClient>,
     context_builder: ContextBuilder,
+    metrics: SharedMetrics,
 }
 
 impl HarpeGrpc {
@@ -39,11 +41,17 @@ impl HarpeGrpc {
             store,
             llm,
             context_builder: ContextBuilder::default(),
+            metrics: AppMetrics::shared(),
         }
     }
 
     pub fn with_context_builder(mut self, context_builder: ContextBuilder) -> Self {
         self.context_builder = context_builder;
+        self
+    }
+
+    pub fn with_metrics(mut self, metrics: SharedMetrics) -> Self {
+        self.metrics = metrics;
         self
     }
 }
@@ -54,6 +62,8 @@ impl user_service_server::UserService for HarpeGrpc {
         &self,
         request: Request<CreateUserRequest>,
     ) -> std::result::Result<Response<pb::User>, Status> {
+        self.metrics.record_grpc_request();
+        tracing::debug!(rpc = "UserService.CreateUser");
         let request = request.into_inner();
         let user = self
             .store
@@ -70,6 +80,8 @@ impl user_service_server::UserService for HarpeGrpc {
         &self,
         request: Request<GetUserRequest>,
     ) -> std::result::Result<Response<pb::User>, Status> {
+        self.metrics.record_grpc_request();
+        tracing::debug!(rpc = "UserService.GetUser");
         let user = self
             .store
             .get_user(&request.into_inner().user_id)
@@ -86,6 +98,8 @@ impl game_service_server::GameService for HarpeGrpc {
         &self,
         request: Request<CreateGameRequest>,
     ) -> std::result::Result<Response<pb::Game>, Status> {
+        self.metrics.record_grpc_request();
+        tracing::debug!(rpc = "GameService.CreateGame");
         let metadata_user_id = optional_user_id(request.metadata()).map_err(status_from_error)?;
         let request = request.into_inner();
         let owner_user_id =
@@ -108,6 +122,8 @@ impl game_service_server::GameService for HarpeGrpc {
         &self,
         request: Request<ListGamesRequest>,
     ) -> std::result::Result<Response<pb::ListGamesResponse>, Status> {
+        self.metrics.record_grpc_request();
+        tracing::debug!(rpc = "GameService.ListGames");
         let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let games = self
             .store
@@ -125,6 +141,8 @@ impl game_service_server::GameService for HarpeGrpc {
         &self,
         request: Request<GetGameRequest>,
     ) -> std::result::Result<Response<pb::Game>, Status> {
+        self.metrics.record_grpc_request();
+        tracing::debug!(rpc = "GameService.GetGame");
         let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let game_id = request.into_inner().game_id;
         let game = require_owned_game(self.store.as_ref(), &game_id, &user_id)
@@ -143,6 +161,8 @@ impl session_service_server::SessionService for HarpeGrpc {
         &self,
         request: Request<CreateSessionRequest>,
     ) -> std::result::Result<Response<pb::Session>, Status> {
+        self.metrics.record_grpc_request();
+        tracing::debug!(rpc = "SessionService.CreateSession");
         let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let request = request.into_inner();
         require_owned_game(self.store.as_ref(), &request.game_id, &user_id)
@@ -164,6 +184,8 @@ impl session_service_server::SessionService for HarpeGrpc {
         &self,
         request: Request<GetSessionRequest>,
     ) -> std::result::Result<Response<pb::Session>, Status> {
+        self.metrics.record_grpc_request();
+        tracing::debug!(rpc = "SessionService.GetSession");
         let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let session_id = request.into_inner().session_id;
         let session = require_owned_session(self.store.as_ref(), &session_id, &user_id)
@@ -177,17 +199,29 @@ impl session_service_server::SessionService for HarpeGrpc {
         &self,
         request: Request<SendMessageRequest>,
     ) -> std::result::Result<Response<Self::SendMessageStream>, Status> {
+        self.metrics.record_grpc_request();
+        tracing::debug!(rpc = "SessionService.SendMessage");
         let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let request = request.into_inner();
         let store = Arc::clone(&self.store);
         let llm = Arc::clone(&self.llm);
+        let metrics = Arc::clone(&self.metrics);
         let context_builder = self.context_builder.clone();
         let (tx, rx) = mpsc::channel(16);
 
         tokio::spawn(async move {
-            if let Err(error) =
-                run_send_message(request, user_id, store, llm, context_builder, tx.clone()).await
+            if let Err(error) = run_send_message(
+                request,
+                user_id,
+                store,
+                llm,
+                metrics.clone(),
+                context_builder,
+                tx.clone(),
+            )
+            .await
             {
+                metrics.record_grpc_failure();
                 let _ = tx.send(Err(status_from_error(error))).await;
             }
         });
@@ -199,6 +233,8 @@ impl session_service_server::SessionService for HarpeGrpc {
         &self,
         request: Request<PreviewContextRequest>,
     ) -> std::result::Result<Response<pb::PreviewContextResponse>, Status> {
+        self.metrics.record_grpc_request();
+        tracing::debug!(rpc = "SessionService.PreviewContext");
         let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let request = request.into_inner();
         if request.content.trim().is_empty() {
@@ -235,6 +271,8 @@ impl session_service_server::SessionService for HarpeGrpc {
         &self,
         request: Request<ListMessagesRequest>,
     ) -> std::result::Result<Response<pb::ListMessagesResponse>, Status> {
+        self.metrics.record_grpc_request();
+        tracing::debug!(rpc = "SessionService.ListMessages");
         let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let request = request.into_inner();
         require_owned_session(self.store.as_ref(), &request.session_id, &user_id)
@@ -259,6 +297,8 @@ impl memory_service_server::MemoryService for HarpeGrpc {
         &self,
         request: Request<GetStorySummaryRequest>,
     ) -> std::result::Result<Response<pb::StorySummary>, Status> {
+        self.metrics.record_grpc_request();
+        tracing::debug!(rpc = "MemoryService.GetStorySummary");
         let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let request = request.into_inner();
         require_owned_session(self.store.as_ref(), &request.session_id, &user_id)
@@ -278,6 +318,8 @@ impl memory_service_server::MemoryService for HarpeGrpc {
         &self,
         request: Request<ListCharactersRequest>,
     ) -> std::result::Result<Response<pb::ListCharactersResponse>, Status> {
+        self.metrics.record_grpc_request();
+        tracing::debug!(rpc = "MemoryService.ListCharacters");
         let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let request = request.into_inner();
         require_owned_game(self.store.as_ref(), &request.game_id, &user_id)
@@ -299,6 +341,8 @@ impl memory_service_server::MemoryService for HarpeGrpc {
         &self,
         request: Request<GetCharacterRequest>,
     ) -> std::result::Result<Response<pb::Character>, Status> {
+        self.metrics.record_grpc_request();
+        tracing::debug!(rpc = "MemoryService.GetCharacter");
         let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let character = self
             .store
@@ -316,6 +360,8 @@ impl memory_service_server::MemoryService for HarpeGrpc {
         &self,
         request: Request<ListEventsRequest>,
     ) -> std::result::Result<Response<pb::ListEventsResponse>, Status> {
+        self.metrics.record_grpc_request();
+        tracing::debug!(rpc = "MemoryService.ListEvents");
         let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let request = request.into_inner();
         require_owned_session(self.store.as_ref(), &request.session_id, &user_id)
@@ -337,6 +383,8 @@ impl memory_service_server::MemoryService for HarpeGrpc {
         &self,
         request: Request<ListWorldFactsRequest>,
     ) -> std::result::Result<Response<pb::ListWorldFactsResponse>, Status> {
+        self.metrics.record_grpc_request();
+        tracing::debug!(rpc = "MemoryService.ListWorldFacts");
         let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let request = request.into_inner();
         require_owned_game(self.store.as_ref(), &request.game_id, &user_id)
@@ -358,6 +406,8 @@ impl memory_service_server::MemoryService for HarpeGrpc {
         &self,
         request: Request<ListLocationsRequest>,
     ) -> std::result::Result<Response<pb::ListLocationsResponse>, Status> {
+        self.metrics.record_grpc_request();
+        tracing::debug!(rpc = "MemoryService.ListLocations");
         let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let request = request.into_inner();
         require_owned_game(self.store.as_ref(), &request.game_id, &user_id)
@@ -379,6 +429,8 @@ impl memory_service_server::MemoryService for HarpeGrpc {
         &self,
         request: Request<SearchMemoryRequest>,
     ) -> std::result::Result<Response<pb::SearchMemoryResponse>, Status> {
+        self.metrics.record_grpc_request();
+        tracing::debug!(rpc = "MemoryService.SearchMemory");
         let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let request = request.into_inner();
         require_owned_session(self.store.as_ref(), &request.session_id, &user_id)
@@ -410,6 +462,8 @@ impl memory_service_server::MemoryService for HarpeGrpc {
         &self,
         request: Request<ExportGameRequest>,
     ) -> std::result::Result<Response<pb::GameSnapshot>, Status> {
+        self.metrics.record_grpc_request();
+        tracing::debug!(rpc = "MemoryService.ExportGame");
         let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let request = request.into_inner();
         require_owned_game(self.store.as_ref(), &request.game_id, &user_id)
@@ -431,10 +485,26 @@ impl health_service_server::HealthService for HarpeGrpc {
         &self,
         request: Request<HealthCheckRequest>,
     ) -> std::result::Result<Response<pb::HealthCheckResponse>, Status> {
+        self.metrics.record_grpc_request();
+        self.metrics.record_health_check();
+        tracing::debug!(rpc = "HealthService.Check");
         let service = normalize_health_service(&request.into_inner().service);
         let response = health_response(self.store.as_ref(), service).await;
 
         Ok(Response::new(response))
+    }
+}
+
+#[tonic::async_trait]
+impl metrics_service_server::MetricsService for HarpeGrpc {
+    async fn get_metrics(
+        &self,
+        _request: Request<GetMetricsRequest>,
+    ) -> std::result::Result<Response<pb::MetricsSnapshot>, Status> {
+        self.metrics.record_grpc_request();
+        tracing::debug!(rpc = "MetricsService.GetMetrics");
+
+        Ok(Response::new(metrics_to_pb(self.metrics.snapshot())))
     }
 }
 
@@ -443,6 +513,7 @@ async fn run_send_message(
     user_id: String,
     store: Arc<dyn HarpeStore>,
     llm: Arc<dyn LlmClient>,
+    metrics: SharedMetrics,
     context_builder: ContextBuilder,
     tx: mpsc::Sender<std::result::Result<MessageDelta, Status>>,
 ) -> Result<()> {
@@ -495,6 +566,7 @@ async fn run_send_message(
         {
             return Ok(());
         }
+        metrics.record_streamed_message();
     }
 
     if assistant_content.trim().is_empty() {
@@ -840,6 +912,20 @@ fn snapshot_to_pb(snapshot: GameSnapshot) -> pb::GameSnapshot {
     }
 }
 
+fn metrics_to_pb(snapshot: AppMetricsSnapshot) -> pb::MetricsSnapshot {
+    pb::MetricsSnapshot {
+        grpc_requests: snapshot.grpc_requests,
+        grpc_failures: snapshot.grpc_failures,
+        streamed_messages: snapshot.streamed_messages,
+        jobs_processed: snapshot.jobs_processed,
+        jobs_succeeded: snapshot.jobs_succeeded,
+        jobs_retried: snapshot.jobs_retried,
+        jobs_failed: snapshot.jobs_failed,
+        health_checks: snapshot.health_checks,
+        collected_at: snapshot.collected_at.to_rfc3339(),
+    }
+}
+
 fn preview_context_to_pb(chat_request: ChatRequest) -> pb::PreviewContextResponse {
     let mut estimated_total = 0_usize;
     let messages = chat_request
@@ -931,5 +1017,18 @@ mod tests {
             normalize_health_service(" harpe.v1.MemoryService "),
             "harpe.v1.MemoryService"
         );
+    }
+
+    #[test]
+    fn metrics_snapshot_maps_to_proto() {
+        let metrics = AppMetrics::default();
+        metrics.record_grpc_request();
+        metrics.record_job_retried();
+
+        let response = metrics_to_pb(metrics.snapshot());
+
+        assert_eq!(response.grpc_requests, 1);
+        assert_eq!(response.jobs_retried, 1);
+        assert!(!response.collected_at.is_empty());
     }
 }

@@ -1,5 +1,8 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
+use async_trait::async_trait;
+use chrono::Utc;
 use futures_util::StreamExt;
 use harpe_server::api::grpc::HarpeGrpc;
 use harpe_server::db::surreal::SurrealStore;
@@ -10,21 +13,28 @@ use harpe_server::domain::{
     UpsertLocation, UpsertStorySummary, UpsertWorldFact,
 };
 use harpe_server::jobs::JobRunner;
-use harpe_server::llm::EchoLlm;
+use harpe_server::jobs::UpdateMemoryAfterTurnPayload;
+use harpe_server::llm::{
+    ChatRequest, EchoLlm, ExtractMemoryRequest, LlmClient, SummarizeRequest, TextStream,
+};
+use harpe_server::observability::AppMetrics;
 use harpe_server::pb::game_service_client::GameServiceClient;
 use harpe_server::pb::game_service_server::GameServiceServer;
 use harpe_server::pb::health_service_client::HealthServiceClient;
 use harpe_server::pb::health_service_server::HealthServiceServer;
 use harpe_server::pb::memory_service_client::MemoryServiceClient;
 use harpe_server::pb::memory_service_server::MemoryServiceServer;
+use harpe_server::pb::metrics_service_client::MetricsServiceClient;
+use harpe_server::pb::metrics_service_server::MetricsServiceServer;
 use harpe_server::pb::session_service_client::SessionServiceClient;
 use harpe_server::pb::session_service_server::SessionServiceServer;
 use harpe_server::pb::user_service_client::UserServiceClient;
 use harpe_server::pb::user_service_server::UserServiceServer;
 use harpe_server::pb::{
     CreateGameRequest, CreateSessionRequest, CreateUserRequest, ExportGameRequest, GetGameRequest,
-    GetStorySummaryRequest, HealthCheckRequest, ListMessagesRequest, ListWorldFactsRequest,
-    PreviewContextRequest, SearchMemoryRequest, SendMessageRequest,
+    GetMetricsRequest, GetStorySummaryRequest, HealthCheckRequest, ListGamesRequest,
+    ListMessagesRequest, ListWorldFactsRequest, PreviewContextRequest, SearchMemoryRequest,
+    SendMessageRequest,
 };
 use harpe_server::store::HarpeStore;
 use tokio::net::TcpListener;
@@ -324,12 +334,36 @@ async fn surreal_store_claims_completes_and_fails_background_jobs() {
     assert_eq!(completed.status, JobStatus::Succeeded);
     assert!(store.claim_next_job().await.unwrap().is_none());
 
+    let future_job = store
+        .enqueue_job(NewBackgroundJob {
+            kind: JobKind::UpdateMemoryAfterTurn,
+            payload: serde_json::json!({"session_id": "session-future"}),
+            max_attempts: 3,
+            run_after: Some(Utc::now() + chrono::Duration::seconds(60)),
+        })
+        .await
+        .unwrap();
+    assert!(store.claim_next_job().await.unwrap().is_none());
+    let retried = store
+        .retry_job(
+            &future_job.id,
+            "retry soon".to_owned(),
+            Utc::now() - chrono::Duration::seconds(1),
+        )
+        .await
+        .unwrap();
+    assert_eq!(retried.status, JobStatus::Pending);
+    assert_eq!(retried.last_error.as_deref(), Some("retry soon"));
+    let claimed_retry = store.claim_next_job().await.unwrap().unwrap();
+    assert_eq!(claimed_retry.id, future_job.id);
+    store.complete_job(&claimed_retry.id).await.unwrap();
+
     store
         .enqueue_job(NewBackgroundJob {
             kind: JobKind::UpdateMemoryAfterTurn,
             payload: serde_json::json!({"session_id": "session-2"}),
             max_attempts: 3,
-            run_after: None,
+            run_after: Some(Utc::now() - chrono::Duration::seconds(1)),
         })
         .await
         .unwrap();
@@ -342,6 +376,108 @@ async fn surreal_store_claims_completes_and_fails_background_jobs() {
     assert_eq!(failed.id, failing_job.id);
     assert_eq!(failed.status, JobStatus::Failed);
     assert_eq!(failed.last_error.as_deref(), Some("model timeout"));
+}
+
+#[tokio::test]
+async fn job_runner_retries_transient_memory_update_failures() {
+    let store = Arc::new(test_store().await);
+    let user = store
+        .create_user(NewUser {
+            display_name: "Noah".to_owned(),
+        })
+        .await
+        .unwrap();
+    let game = store
+        .create_game(NewGame {
+            owner_user_id: user.id,
+            title: "Retry Coast".to_owned(),
+            system_prompt: "Run a retry test.".to_owned(),
+        })
+        .await
+        .unwrap();
+    let session = store
+        .create_session(NewSession {
+            game_id: game.id.clone(),
+            title: "Retry session".to_owned(),
+        })
+        .await
+        .unwrap();
+    store
+        .append_message(NewMessage {
+            id: None,
+            session_id: session.id.clone(),
+            role: MessageRole::User,
+            content: "I test the retry path.".to_owned(),
+        })
+        .await
+        .unwrap();
+    let assistant = store
+        .append_message(NewMessage {
+            id: None,
+            session_id: session.id.clone(),
+            role: MessageRole::Assistant,
+            content: "The retry beacon flashes.".to_owned(),
+        })
+        .await
+        .unwrap();
+    let job = store
+        .enqueue_job(NewBackgroundJob {
+            kind: JobKind::UpdateMemoryAfterTurn,
+            payload: UpdateMemoryAfterTurnPayload::new(
+                game.id.clone(),
+                session.id.clone(),
+                assistant.id,
+                "The retry beacon flashes.".to_owned(),
+            )
+            .into_value()
+            .unwrap(),
+            max_attempts: 2,
+            run_after: None,
+        })
+        .await
+        .unwrap();
+    let metrics = AppMetrics::shared();
+    let runner = JobRunner::new(store.clone(), Arc::new(FlakySummarizeLlm::new(1)))
+        .with_metrics(metrics.clone());
+
+    assert_eq!(runner.process_all_pending_jobs(10).await.unwrap(), 1);
+    let pending = store.list_jobs(Some(JobStatus::Pending), 10).await.unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].id, job.id);
+    assert_eq!(pending[0].attempts, 1);
+    assert!(
+        pending[0]
+            .last_error
+            .as_deref()
+            .unwrap()
+            .contains("transient")
+    );
+    assert!(pending[0].run_after > Utc::now());
+
+    store
+        .retry_job(
+            &job.id,
+            "ready now".to_owned(),
+            Utc::now() - chrono::Duration::seconds(1),
+        )
+        .await
+        .unwrap();
+    assert_eq!(runner.process_all_pending_jobs(10).await.unwrap(), 1);
+
+    let succeeded = store
+        .list_jobs(Some(JobStatus::Succeeded), 10)
+        .await
+        .unwrap();
+    assert_eq!(succeeded.len(), 1);
+    assert_eq!(succeeded[0].attempts, 2);
+    let summary = store.get_story_summary(&session.id).await.unwrap().unwrap();
+    assert!(summary.content.contains("Recovered summary"));
+
+    let snapshot = metrics.snapshot();
+    assert_eq!(snapshot.jobs_processed, 2);
+    assert_eq!(snapshot.jobs_retried, 1);
+    assert_eq!(snapshot.jobs_succeeded, 1);
+    assert_eq!(snapshot.jobs_failed, 0);
 }
 
 #[tokio::test]
@@ -373,13 +509,15 @@ async fn grpc_send_message_streams_response_and_updates_memory() {
             },
         ),
     );
-    let service = HarpeGrpc::new(store.clone(), llm.clone());
+    let metrics = AppMetrics::shared();
+    let service = HarpeGrpc::new(store.clone(), llm.clone()).with_metrics(metrics.clone());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
 
     let server = tokio::spawn(
         Server::builder()
             .add_service(HealthServiceServer::new(service.clone()))
+            .add_service(MetricsServiceServer::new(service.clone()))
             .add_service(UserServiceServer::new(service.clone()))
             .add_service(GameServiceServer::new(service.clone()))
             .add_service(SessionServiceServer::new(service.clone()))
@@ -444,6 +582,12 @@ async fn grpc_send_message_streams_response_and_updates_memory() {
         .into_inner();
 
     let mut game_client = GameServiceClient::new(channel.clone());
+    let missing_auth = game_client
+        .list_games(ListGamesRequest { limit: 10 })
+        .await
+        .unwrap_err();
+    assert_eq!(missing_auth.code(), Code::PermissionDenied);
+
     let game = game_client
         .create_game(with_user(
             CreateGameRequest {
@@ -560,12 +704,13 @@ async fn grpc_send_message_streams_response_and_updates_memory() {
     assert_eq!(jobs[0].kind, JobKind::UpdateMemoryAfterTurn);
 
     let processed = JobRunner::new(store.clone(), llm)
+        .with_metrics(metrics.clone())
         .process_all_pending_jobs(10)
         .await
         .unwrap();
     assert_eq!(processed, 1);
 
-    let mut memory_client = MemoryServiceClient::new(channel);
+    let mut memory_client = MemoryServiceClient::new(channel.clone());
     let summary = memory_client
         .get_story_summary(with_user(
             GetStorySummaryRequest {
@@ -666,6 +811,19 @@ async fn grpc_send_message_streams_response_and_updates_memory() {
     assert_eq!(snapshot.sessions.len(), 1);
     assert_eq!(snapshot.memory_chunks.len(), 5);
 
+    let metrics_snapshot = MetricsServiceClient::new(channel)
+        .get_metrics(GetMetricsRequest {})
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(metrics_snapshot.grpc_requests >= 15);
+    assert_eq!(metrics_snapshot.health_checks, 2);
+    assert_eq!(metrics_snapshot.streamed_messages, 2);
+    assert_eq!(metrics_snapshot.jobs_processed, 1);
+    assert_eq!(metrics_snapshot.jobs_succeeded, 1);
+    assert_eq!(metrics_snapshot.jobs_retried, 0);
+    assert_eq!(metrics_snapshot.jobs_failed, 0);
+
     server.abort();
 }
 
@@ -704,4 +862,53 @@ async fn assert_relation_targets(
         "unexpected out record: {}",
         edges[0].out_record
     );
+}
+
+struct FlakySummarizeLlm {
+    failures_remaining: AtomicUsize,
+}
+
+impl FlakySummarizeLlm {
+    fn new(failures: usize) -> Self {
+        Self {
+            failures_remaining: AtomicUsize::new(failures),
+        }
+    }
+}
+
+#[async_trait]
+impl LlmClient for FlakySummarizeLlm {
+    async fn stream_chat(&self, _request: ChatRequest) -> harpe_server::Result<TextStream> {
+        Ok(Box::pin(tokio_stream::iter(vec![Ok(
+            "flaky response".to_owned()
+        )])))
+    }
+
+    async fn summarize(&self, _request: SummarizeRequest) -> harpe_server::Result<String> {
+        if self.failures_remaining.load(Ordering::SeqCst) > 0 {
+            self.failures_remaining.fetch_sub(1, Ordering::SeqCst);
+            return Err(harpe_server::HarpeError::Llm(
+                "transient summarize failure".to_owned(),
+            ));
+        }
+
+        Ok("Recovered summary after retry.".to_owned())
+    }
+
+    async fn extract_memory(
+        &self,
+        _request: ExtractMemoryRequest,
+    ) -> harpe_server::Result<MemoryExtraction> {
+        Ok(MemoryExtraction {
+            events: vec![ExtractedEvent {
+                summary: "The retry beacon flashes.".to_owned(),
+                importance: 3,
+            }],
+            ..MemoryExtraction::default()
+        })
+    }
+
+    async fn embed(&self, _text: &str) -> harpe_server::Result<Vec<f32>> {
+        Ok(vec![1.0; 16])
+    }
 }

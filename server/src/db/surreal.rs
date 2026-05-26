@@ -340,6 +340,7 @@ impl SurrealStore {
         status: JobStatus,
         attempts: Option<i32>,
         last_error: Option<String>,
+        run_after: Option<DateTime<Utc>>,
     ) -> Result<BackgroundJob> {
         let mut row: JobRow = self
             .db
@@ -352,6 +353,9 @@ impl SurrealStore {
             row.attempts = attempts;
         }
         row.last_error = last_error;
+        if let Some(run_after) = run_after {
+            row.run_after = run_after;
+        }
         row.updated_at = Utc::now();
 
         let updated: Option<JobRow> = self
@@ -533,18 +537,35 @@ impl HarpeStore for SurrealStore {
             JobStatus::Running,
             Some(row.attempts.saturating_add(1)),
             None,
+            None,
         )
         .await
         .map(Some)
     }
 
     async fn complete_job(&self, job_id: &str) -> Result<BackgroundJob> {
-        self.update_job_state(job_id, JobStatus::Succeeded, None, None)
+        self.update_job_state(job_id, JobStatus::Succeeded, None, None, None)
             .await
     }
 
+    async fn retry_job(
+        &self,
+        job_id: &str,
+        error: String,
+        run_after: DateTime<Utc>,
+    ) -> Result<BackgroundJob> {
+        self.update_job_state(
+            job_id,
+            JobStatus::Pending,
+            None,
+            Some(error),
+            Some(run_after),
+        )
+        .await
+    }
+
     async fn fail_job(&self, job_id: &str, error: String) -> Result<BackgroundJob> {
-        self.update_job_state(job_id, JobStatus::Failed, None, Some(error))
+        self.update_job_state(job_id, JobStatus::Failed, None, Some(error), None)
             .await
     }
 

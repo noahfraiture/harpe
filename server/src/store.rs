@@ -53,6 +53,12 @@ pub trait HarpeStore: Send + Sync {
     ) -> Result<Vec<BackgroundJob>>;
     async fn claim_next_job(&self) -> Result<Option<BackgroundJob>>;
     async fn complete_job(&self, job_id: &str) -> Result<BackgroundJob>;
+    async fn retry_job(
+        &self,
+        job_id: &str,
+        error: String,
+        run_after: chrono::DateTime<chrono::Utc>,
+    ) -> Result<BackgroundJob>;
     async fn fail_job(&self, job_id: &str, error: String) -> Result<BackgroundJob>;
 
     async fn create_session(&self, input: NewSession) -> Result<Session>;

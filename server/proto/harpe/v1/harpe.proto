@@ -36,6 +36,10 @@ service HealthService {
   rpc Check(HealthCheckRequest) returns (HealthCheckResponse);
 }
 
+service MetricsService {
+  rpc GetMetrics(GetMetricsRequest) returns (MetricsSnapshot);
+}
+
 message User {
   string id = 1;
   string display_name = 2;
@@ -290,4 +294,18 @@ message HealthCheckResponse {
   uint32 pending_jobs = 5;
   uint32 failed_jobs = 6;
   string checked_at = 7;
+}
+
+message GetMetricsRequest {}
+
+message MetricsSnapshot {
+  uint64 grpc_requests = 1;
+  uint64 grpc_failures = 2;
+  uint64 streamed_messages = 3;
+  uint64 jobs_processed = 4;
+  uint64 jobs_succeeded = 5;
+  uint64 jobs_retried = 6;
+  uint64 jobs_failed = 7;
+  uint64 health_checks = 8;
+  string collected_at = 9;
 }

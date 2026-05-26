@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -10,6 +11,7 @@ use crate::domain::{
     WorldFact,
 };
 use crate::llm::{ExtractMemoryRequest, LlmClient, SummarizeRequest};
+use crate::observability::{AppMetrics, SharedMetrics};
 use crate::store::HarpeStore;
 use crate::{HarpeError, Result};
 
@@ -17,24 +19,38 @@ use crate::{HarpeError, Result};
 pub struct JobRunner {
     store: Arc<dyn HarpeStore>,
     llm: Arc<dyn LlmClient>,
+    metrics: SharedMetrics,
 }
 
 impl JobRunner {
     pub fn new(store: Arc<dyn HarpeStore>, llm: Arc<dyn LlmClient>) -> Self {
-        Self { store, llm }
+        Self {
+            store,
+            llm,
+            metrics: AppMetrics::shared(),
+        }
+    }
+
+    pub fn with_metrics(mut self, metrics: SharedMetrics) -> Self {
+        self.metrics = metrics;
+        self
     }
 
     pub async fn process_next_job(&self) -> Result<Option<BackgroundJob>> {
         let Some(job) = self.store.claim_next_job().await? else {
             return Ok(None);
         };
+        self.metrics.record_job_processed();
 
         if let Err(error) = self.process_claimed_job(&job).await {
-            let _ = self.store.fail_job(&job.id, error.to_string()).await;
-            return Err(error);
+            return self.handle_failed_job(&job, error).await.map(Some);
         }
 
-        self.store.complete_job(&job.id).await.map(Some)
+        let completed = self.store.complete_job(&job.id).await?;
+        self.metrics.record_job_succeeded();
+        tracing::info!(job_id = %job.id, attempts = job.attempts, "background job succeeded");
+
+        Ok(Some(completed))
     }
 
     pub async fn process_all_pending_jobs(&self, limit: usize) -> Result<usize> {
@@ -93,6 +109,46 @@ impl JobRunner {
             }
         }
     }
+
+    async fn handle_failed_job(
+        &self,
+        job: &BackgroundJob,
+        error: HarpeError,
+    ) -> Result<BackgroundJob> {
+        if should_retry(job) {
+            let delay = retry_delay_for_attempt(job.attempts);
+            let run_after = Utc::now()
+                + chrono::Duration::from_std(delay)
+                    .map_err(|error| HarpeError::Store(error.to_string()))?;
+            let retried = self
+                .store
+                .retry_job(&job.id, error.to_string(), run_after)
+                .await?;
+            self.metrics.record_job_retried();
+            tracing::warn!(
+                job_id = %job.id,
+                attempts = job.attempts,
+                max_attempts = job.max_attempts,
+                retry_after_ms = delay.as_millis(),
+                error = %error,
+                "background job scheduled for retry"
+            );
+
+            return Ok(retried);
+        }
+
+        self.store.fail_job(&job.id, error.to_string()).await?;
+        self.metrics.record_job_failed();
+        tracing::error!(
+            job_id = %job.id,
+            attempts = job.attempts,
+            max_attempts = job.max_attempts,
+            error = %error,
+            "background job permanently failed"
+        );
+
+        Err(error)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,6 +190,15 @@ pub fn new_update_memory_job(payload: UpdateMemoryAfterTurnPayload) -> Result<Ne
         max_attempts: 3,
         run_after: None,
     })
+}
+
+fn should_retry(job: &BackgroundJob) -> bool {
+    job.attempts < job.max_attempts
+}
+
+fn retry_delay_for_attempt(attempts: i32) -> Duration {
+    let exponent = attempts.clamp(0, 8) as u32;
+    Duration::from_secs(2_u64.pow(exponent)).min(Duration::from_secs(300))
 }
 
 pub async fn update_memory_after_turn(
@@ -331,6 +396,8 @@ fn same_fact(fact: &WorldFact, subject: &str, predicate: &str, object: &str) -> 
 
 #[cfg(test)]
 mod tests {
+    use chrono::Utc;
+
     use super::*;
 
     #[test]
@@ -377,5 +444,29 @@ mod tests {
 
         assert!(same_fact(&fact, " silver key ", "opens", "lower vault"));
         assert!(!same_fact(&fact, "bronze key", "opens", "lower vault"));
+    }
+
+    #[test]
+    fn retry_policy_uses_attempts_and_caps_delay() {
+        let job = BackgroundJob {
+            id: "job-1".to_owned(),
+            kind: JobKind::UpdateMemoryAfterTurn,
+            status: JobStatus::Running,
+            payload: serde_json::json!({}),
+            attempts: 2,
+            max_attempts: 3,
+            last_error: None,
+            run_after: Utc::now(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        assert!(should_retry(&job));
+        assert_eq!(retry_delay_for_attempt(0), Duration::from_secs(1));
+        assert_eq!(retry_delay_for_attempt(2), Duration::from_secs(4));
+        assert_eq!(retry_delay_for_attempt(99), Duration::from_secs(256));
+
+        let exhausted = BackgroundJob { attempts: 3, ..job };
+        assert!(!should_retry(&exhausted));
     }
 }

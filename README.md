@@ -4,15 +4,16 @@ Backend for an LLM-assisted roleplay game app.
 
 The current milestone is a Rust gRPC server with:
 
-- generated protobuf API for users, games, sessions, messages, summaries, characters, indexed memory search, context preview, health checks, and game export
+- generated protobuf API for users, games, sessions, messages, summaries, characters, indexed memory search, context preview, health checks, metrics, and game export
 - SurrealDB storage through the Rust SDK with versioned migrations, schemafull tables, and graph relation tables
 - an LLM abstraction with a deterministic development implementation and an OpenAI-compatible HTTP adapter
 - structured memory extraction for events, character updates, world facts, and locations
 - a budget-aware context builder that ranks story summary, recent events, memories, character state, world facts, locations, and recent messages
-- durable background jobs for turn memory updates
+- durable background jobs for turn memory updates with retry/backoff
 - `x-user-id` gRPC metadata checks for user-owned game/session data
 - SurrealDB full-text memory indexing plus optional HNSW vector lookup for 16-dimensional embeddings
 - typed config, graceful shutdown, Docker assets, and game snapshot export for backups
+- in-process counters for gRPC requests, streamed messages, job outcomes, and health checks
 - unit tests plus integration tests covering embedded SurrealDB, migration idempotence, graph edges, and a real gRPC client/server path
 
 ## Run

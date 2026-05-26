@@ -6,6 +6,7 @@ pub mod engine;
 pub mod error;
 pub mod jobs;
 pub mod llm;
+pub mod observability;
 pub mod store;
 
 pub mod pb {

@@ -727,6 +727,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn http_llm_reports_non_success_status() {
+        let mut mock = spawn_mock_http(vec![http_response(
+            "application/json",
+            r#"{"error":"model overloaded"}"#,
+            "503 Service Unavailable",
+        )])
+        .await;
+        let llm = test_http_llm(&mock.base_url);
+
+        let error = llm.embed("silver key").await.unwrap_err();
+
+        assert!(matches!(error, HarpeError::Llm(message) if message.contains("503")));
+        let request = mock.requests.recv().await.unwrap();
+        assert!(request.contains("POST /v1/embeddings"));
+    }
+
+    #[tokio::test]
+    async fn http_llm_rejects_empty_embedding_response() {
+        let mock = spawn_mock_http(vec![json_response(r#"{"data":[]}"#)]).await;
+        let llm = test_http_llm(&mock.base_url);
+
+        let error = llm.embed("silver key").await.unwrap_err();
+
+        assert!(matches!(error, HarpeError::Llm(message) if message.contains("empty")));
+    }
+
+    #[tokio::test]
     async fn http_llm_summarizes_and_extracts_memory_json() {
         let extraction_content = serde_json::json!({
             "events": [{"summary": "The sea gate opens.", "importance": 4}],
@@ -897,16 +924,16 @@ mod tests {
     }
 
     fn json_response(body: &str) -> String {
-        http_response("application/json", body)
+        http_response("application/json", body, "200 OK")
     }
 
     fn sse_response(body: &str) -> String {
-        http_response("text/event-stream", body)
+        http_response("text/event-stream", body, "200 OK")
     }
 
-    fn http_response(content_type: &str, body: &str) -> String {
+    fn http_response(content_type: &str, body: &str, status: &str) -> String {
         format!(
-            "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
             body.len()
         )
     }

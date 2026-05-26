@@ -4,10 +4,10 @@
 
 - Replace the first-pass token estimator with model/provider-specific tokenization.
 - Add model-aware context sizing presets.
-- Add automatic retry/backoff policies for failed background jobs.
+- Add dead-letter management UI/commands for permanently failed background jobs.
 - Add provider-specific vector indexes once production embedding dimensions/model choices settle.
 - Backfill richer graph relation edges from extraction batches, such as event-character, event-location, character-fact, and memory-fact links.
-- Add production observability: structured request logs, metrics, and tracing spans.
+- Add production observability: request latency histograms, metrics export format, and distributed tracing spans.
 - Add incremental/streaming backup export for large campaigns.
 
 ## Testing
