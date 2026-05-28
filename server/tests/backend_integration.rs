@@ -3,7 +3,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use chrono::Utc;
-use futures_util::StreamExt;
+use futures_util::{StreamExt, stream::iter};
+use harpe_server::HarpeError;
 use harpe_server::api::grpc::HarpeGrpc;
 use harpe_server::db::surreal::SurrealStore;
 use harpe_server::domain::{
@@ -12,8 +13,7 @@ use harpe_server::domain::{
     NewEvent, NewGame, NewMemoryChunk, NewMessage, NewSession, NewUser, UpsertCharacter,
     UpsertLocation, UpsertStorySummary, UpsertWorldFact,
 };
-use harpe_server::jobs::JobRunner;
-use harpe_server::jobs::UpdateMemoryAfterTurnPayload;
+use harpe_server::jobs::{JobRunner, UpdateMemoryAfterTurnPayload, update_memory_after_turn};
 use harpe_server::llm::{
     ChatRequest, EchoLlm, ExtractMemoryRequest, LlmClient, SummarizeRequest, TextStream,
 };
@@ -40,7 +40,7 @@ use harpe_server::store::HarpeStore;
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::metadata::MetadataValue;
-use tonic::transport::{Endpoint, Server};
+use tonic::transport::{Channel, Endpoint, Server};
 use tonic::{Code, Request};
 use uuid::Uuid;
 
@@ -306,6 +306,184 @@ async fn surreal_migrations_are_versioned_and_idempotent() {
 }
 
 #[tokio::test]
+async fn surreal_store_rejects_invalid_inputs_and_reports_not_found() {
+    let store = test_store().await;
+
+    assert_validation(
+        store
+            .create_user(NewUser {
+                display_name: " ".to_owned(),
+            })
+            .await
+            .unwrap_err(),
+        "display name",
+    );
+    assert_not_found(
+        store.get_user("missing-user").await.unwrap_err(),
+        "missing-user",
+    );
+    assert_validation(
+        store
+            .create_game(NewGame {
+                owner_user_id: " ".to_owned(),
+                title: "Invalid".to_owned(),
+                system_prompt: String::new(),
+            })
+            .await
+            .unwrap_err(),
+        "owner user id",
+    );
+
+    let user = store
+        .create_user(NewUser {
+            display_name: "Noah".to_owned(),
+        })
+        .await
+        .unwrap();
+    assert_not_found(
+        store
+            .create_game(NewGame {
+                owner_user_id: "missing-owner".to_owned(),
+                title: "Invalid owner".to_owned(),
+                system_prompt: String::new(),
+            })
+            .await
+            .unwrap_err(),
+        "missing-owner",
+    );
+    let game = store
+        .create_game(NewGame {
+            owner_user_id: user.id,
+            title: "Validation Coast".to_owned(),
+            system_prompt: String::new(),
+        })
+        .await
+        .unwrap();
+
+    assert_validation(
+        store
+            .create_session(NewSession {
+                game_id: " ".to_owned(),
+                title: "Invalid".to_owned(),
+            })
+            .await
+            .unwrap_err(),
+        "game id",
+    );
+    assert_not_found(
+        store
+            .create_session(NewSession {
+                game_id: "missing-game".to_owned(),
+                title: "Invalid".to_owned(),
+            })
+            .await
+            .unwrap_err(),
+        "missing-game",
+    );
+    assert_not_found(
+        store.get_session("missing-session").await.unwrap_err(),
+        "missing-session",
+    );
+    let session = store
+        .create_session(NewSession {
+            game_id: game.id.clone(),
+            title: "Validation session".to_owned(),
+        })
+        .await
+        .unwrap();
+
+    assert_validation(
+        store
+            .append_message(NewMessage {
+                id: None,
+                session_id: session.id.clone(),
+                role: MessageRole::User,
+                content: " ".to_owned(),
+            })
+            .await
+            .unwrap_err(),
+        "message content",
+    );
+    assert_validation(
+        store
+            .upsert_story_summary(UpsertStorySummary {
+                session_id: " ".to_owned(),
+                content: "Invalid".to_owned(),
+            })
+            .await
+            .unwrap_err(),
+        "session id",
+    );
+    assert_validation(
+        store
+            .upsert_character(UpsertCharacter {
+                id: None,
+                game_id: game.id.clone(),
+                name: " ".to_owned(),
+                description: String::new(),
+                status: String::new(),
+            })
+            .await
+            .unwrap_err(),
+        "character name",
+    );
+    assert_not_found(
+        store.get_character("missing-character").await.unwrap_err(),
+        "missing-character",
+    );
+    assert_validation(
+        store
+            .save_event(NewEvent {
+                session_id: session.id.clone(),
+                summary: " ".to_owned(),
+                importance: 3,
+            })
+            .await
+            .unwrap_err(),
+        "event summary",
+    );
+    assert_validation(
+        store
+            .upsert_location(UpsertLocation {
+                id: None,
+                game_id: game.id.clone(),
+                name: " ".to_owned(),
+                description: String::new(),
+            })
+            .await
+            .unwrap_err(),
+        "location name",
+    );
+    assert_validation(
+        store
+            .upsert_world_fact(UpsertWorldFact {
+                id: None,
+                game_id: game.id.clone(),
+                subject: "beacon".to_owned(),
+                predicate: "marks".to_owned(),
+                object: " ".to_owned(),
+                content: String::new(),
+                confidence: 0.8,
+            })
+            .await
+            .unwrap_err(),
+        "world fact object",
+    );
+    assert_validation(
+        store
+            .save_memory_chunk(NewMemoryChunk {
+                session_id: session.id,
+                kind: "event".to_owned(),
+                content: " ".to_owned(),
+                embedding: vec![0.0; 16],
+            })
+            .await
+            .unwrap_err(),
+        "memory content",
+    );
+}
+
+#[tokio::test]
 async fn surreal_store_claims_completes_and_fails_background_jobs() {
     let store = test_store().await;
 
@@ -481,6 +659,354 @@ async fn job_runner_retries_transient_memory_update_failures() {
 }
 
 #[tokio::test]
+async fn job_runner_marks_exhausted_jobs_failed() {
+    let store = Arc::new(test_store().await);
+    let user = store
+        .create_user(NewUser {
+            display_name: "Noah".to_owned(),
+        })
+        .await
+        .unwrap();
+    let game = store
+        .create_game(NewGame {
+            owner_user_id: user.id,
+            title: "Failure Coast".to_owned(),
+            system_prompt: "Run a failure test.".to_owned(),
+        })
+        .await
+        .unwrap();
+    let session = store
+        .create_session(NewSession {
+            game_id: game.id.clone(),
+            title: "Failure session".to_owned(),
+        })
+        .await
+        .unwrap();
+    let assistant = store
+        .append_message(NewMessage {
+            id: None,
+            session_id: session.id.clone(),
+            role: MessageRole::Assistant,
+            content: "The beacon burns out.".to_owned(),
+        })
+        .await
+        .unwrap();
+    let job = store
+        .enqueue_job(NewBackgroundJob {
+            kind: JobKind::UpdateMemoryAfterTurn,
+            payload: UpdateMemoryAfterTurnPayload::new(
+                game.id,
+                session.id,
+                assistant.id,
+                "The beacon burns out.".to_owned(),
+            )
+            .into_value()
+            .unwrap(),
+            max_attempts: 1,
+            run_after: None,
+        })
+        .await
+        .unwrap();
+    let metrics = AppMetrics::shared();
+    let runner = JobRunner::new(store.clone(), Arc::new(FlakySummarizeLlm::new(1)))
+        .with_metrics(metrics.clone());
+
+    let error = runner.process_all_pending_jobs(10).await.unwrap_err();
+    assert!(error.to_string().contains("transient"));
+
+    let failed = store.list_jobs(Some(JobStatus::Failed), 10).await.unwrap();
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0].id, job.id);
+    assert_eq!(failed[0].attempts, 1);
+    assert!(
+        failed[0]
+            .last_error
+            .as_deref()
+            .unwrap()
+            .contains("transient")
+    );
+
+    let snapshot = metrics.snapshot();
+    assert_eq!(snapshot.jobs_processed, 1);
+    assert_eq!(snapshot.jobs_retried, 0);
+    assert_eq!(snapshot.jobs_succeeded, 0);
+    assert_eq!(snapshot.jobs_failed, 1);
+}
+
+#[tokio::test]
+async fn job_runner_fails_jobs_that_target_a_different_game_than_the_session() {
+    let store = Arc::new(test_store().await);
+    let user = store
+        .create_user(NewUser {
+            display_name: "Noah".to_owned(),
+        })
+        .await
+        .unwrap();
+    let first_game = store
+        .create_game(NewGame {
+            owner_user_id: user.id.clone(),
+            title: "First Coast".to_owned(),
+            system_prompt: String::new(),
+        })
+        .await
+        .unwrap();
+    let second_game = store
+        .create_game(NewGame {
+            owner_user_id: user.id,
+            title: "Second Coast".to_owned(),
+            system_prompt: String::new(),
+        })
+        .await
+        .unwrap();
+    let session = store
+        .create_session(NewSession {
+            game_id: first_game.id.clone(),
+            title: "Mismatched session".to_owned(),
+        })
+        .await
+        .unwrap();
+    let assistant = store
+        .append_message(NewMessage {
+            id: None,
+            session_id: session.id.clone(),
+            role: MessageRole::Assistant,
+            content: "The path points elsewhere.".to_owned(),
+        })
+        .await
+        .unwrap();
+    let job = store
+        .enqueue_job(NewBackgroundJob {
+            kind: JobKind::UpdateMemoryAfterTurn,
+            payload: UpdateMemoryAfterTurnPayload::new(
+                second_game.id,
+                session.id,
+                assistant.id,
+                "The path points elsewhere.".to_owned(),
+            )
+            .into_value()
+            .unwrap(),
+            max_attempts: 1,
+            run_after: None,
+        })
+        .await
+        .unwrap();
+    let runner = JobRunner::new(store.clone(), Arc::new(EchoLlm::development_default()));
+
+    let error = runner.process_all_pending_jobs(10).await.unwrap_err();
+    assert!(error.to_string().contains("targets game"));
+
+    let failed = store.list_jobs(Some(JobStatus::Failed), 10).await.unwrap();
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0].id, job.id);
+    assert!(
+        failed[0]
+            .last_error
+            .as_deref()
+            .unwrap()
+            .contains("targets game")
+    );
+}
+
+#[tokio::test]
+async fn memory_update_ignores_blank_extracted_items_without_creating_records() {
+    let store = test_store().await;
+    let user = store
+        .create_user(NewUser {
+            display_name: "Noah".to_owned(),
+        })
+        .await
+        .unwrap();
+    let game = store
+        .create_game(NewGame {
+            owner_user_id: user.id,
+            title: "Blank Memory Coast".to_owned(),
+            system_prompt: String::new(),
+        })
+        .await
+        .unwrap();
+    let session = store
+        .create_session(NewSession {
+            game_id: game.id.clone(),
+            title: "Blank extraction session".to_owned(),
+        })
+        .await
+        .unwrap();
+    store
+        .append_message(NewMessage {
+            id: None,
+            session_id: session.id.clone(),
+            role: MessageRole::User,
+            content: "I wait for the empty signal.".to_owned(),
+        })
+        .await
+        .unwrap();
+    store
+        .append_message(NewMessage {
+            id: None,
+            session_id: session.id.clone(),
+            role: MessageRole::Assistant,
+            content: "The empty signal fades.".to_owned(),
+        })
+        .await
+        .unwrap();
+    let llm = EchoLlm::new(Vec::new()).with_extraction(MemoryExtraction {
+        events: vec![ExtractedEvent {
+            summary: " ".to_owned(),
+            importance: 4,
+        }],
+        character_updates: vec![ExtractedCharacterUpdate {
+            name: " ".to_owned(),
+            description: "Should be ignored".to_owned(),
+            status: "ignored".to_owned(),
+        }],
+        world_facts: vec![ExtractedWorldFact {
+            subject: " ".to_owned(),
+            predicate: "marks".to_owned(),
+            object: "coast".to_owned(),
+            content: "Should be ignored".to_owned(),
+            confidence: 0.7,
+        }],
+        locations: vec![ExtractedLocation {
+            name: " ".to_owned(),
+            description: "Should be ignored".to_owned(),
+        }],
+    });
+
+    update_memory_after_turn(&session, &game.id, "The empty signal fades.", &store, &llm)
+        .await
+        .unwrap();
+
+    assert!(
+        store
+            .get_story_summary(&session.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .content
+            .contains("The empty signal fades.")
+    );
+    assert!(store.list_events(&session.id, 10).await.unwrap().is_empty());
+    assert!(store.list_characters(&game.id).await.unwrap().is_empty());
+    assert!(
+        store
+            .list_world_facts(&game.id, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(store.list_locations(&game.id).await.unwrap().is_empty());
+    let chunks = store.list_memory_chunks(&session.id, 10).await.unwrap();
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(chunks[0].kind, "turn");
+    assert_eq!(chunks[0].content, "The empty signal fades.");
+}
+
+#[tokio::test]
+async fn grpc_send_message_stream_reports_validation_and_empty_assistant_errors() {
+    let store = Arc::new(test_store().await);
+    let metrics = AppMetrics::shared();
+    let service =
+        HarpeGrpc::new(store.clone(), Arc::new(EmptyAssistantLlm)).with_metrics(metrics.clone());
+    let (channel, server) = spawn_grpc_service(service).await;
+
+    let mut user_client = UserServiceClient::new(channel.clone());
+    let user = user_client
+        .create_user(CreateUserRequest {
+            display_name: "Noah".to_owned(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let mut game_client = GameServiceClient::new(channel.clone());
+    let game = game_client
+        .create_game(with_user(
+            CreateGameRequest {
+                title: "Error Coast".to_owned(),
+                system_prompt: String::new(),
+                owner_user_id: String::new(),
+            },
+            &user.id,
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    let mut session_client = SessionServiceClient::new(channel.clone());
+    let session = session_client
+        .create_session(with_user(
+            CreateSessionRequest {
+                game_id: game.id,
+                title: "Error session".to_owned(),
+            },
+            &user.id,
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let mut empty_content_stream = session_client
+        .send_message(with_user(
+            SendMessageRequest {
+                session_id: session.id.clone(),
+                content: " ".to_owned(),
+            },
+            &user.id,
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    let empty_content_error = empty_content_stream.next().await.unwrap().unwrap_err();
+    assert_eq!(empty_content_error.code(), Code::InvalidArgument);
+    assert!(empty_content_error.message().contains("message content"));
+
+    let mut empty_assistant_stream = session_client
+        .send_message(with_user(
+            SendMessageRequest {
+                session_id: session.id.clone(),
+                content: "I wait for an answer.".to_owned(),
+            },
+            &user.id,
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    let empty_assistant_error = empty_assistant_stream.next().await.unwrap().unwrap_err();
+    assert_eq!(empty_assistant_error.code(), Code::Unavailable);
+    assert!(
+        empty_assistant_error
+            .message()
+            .contains("assistant response was empty")
+    );
+
+    let messages = session_client
+        .list_messages(with_user(
+            ListMessagesRequest {
+                session_id: session.id.clone(),
+                limit: 10,
+            },
+            &user.id,
+        ))
+        .await
+        .unwrap()
+        .into_inner()
+        .messages;
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].role, harpe_server::pb::MessageRole::User as i32);
+    assert!(
+        store
+            .list_jobs(Some(JobStatus::Pending), 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let snapshot = metrics.snapshot();
+    assert_eq!(snapshot.grpc_failures, 2);
+    assert_eq!(snapshot.streamed_messages, 0);
+
+    server.abort();
+}
+
+#[tokio::test]
 async fn grpc_send_message_streams_response_and_updates_memory() {
     let store = Arc::new(test_store().await);
     let llm = Arc::new(
@@ -511,25 +1037,7 @@ async fn grpc_send_message_streams_response_and_updates_memory() {
     );
     let metrics = AppMetrics::shared();
     let service = HarpeGrpc::new(store.clone(), llm.clone()).with_metrics(metrics.clone());
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-
-    let server = tokio::spawn(
-        Server::builder()
-            .add_service(HealthServiceServer::new(service.clone()))
-            .add_service(MetricsServiceServer::new(service.clone()))
-            .add_service(UserServiceServer::new(service.clone()))
-            .add_service(GameServiceServer::new(service.clone()))
-            .add_service(SessionServiceServer::new(service.clone()))
-            .add_service(MemoryServiceServer::new(service))
-            .serve_with_incoming(TcpListenerStream::new(listener)),
-    );
-
-    let channel = Endpoint::from_shared(format!("http://{addr}"))
-        .unwrap()
-        .connect()
-        .await
-        .unwrap();
+    let (channel, server) = spawn_grpc_service(service).await;
 
     let health = HealthServiceClient::new(channel.clone())
         .check(HealthCheckRequest {
@@ -580,6 +1088,14 @@ async fn grpc_send_message_streams_response_and_updates_memory() {
         .await
         .unwrap()
         .into_inner();
+    let fetched_user = user_client
+        .get_user(harpe_server::pb::GetUserRequest {
+            user_id: user.id.clone(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(fetched_user.id, user.id);
 
     let mut game_client = GameServiceClient::new(channel.clone());
     let missing_auth = game_client
@@ -632,6 +1148,21 @@ async fn grpc_send_message_streams_response_and_updates_memory() {
         .await
         .unwrap()
         .into_inner();
+    let fetched_session = session_client
+        .get_session(with_user(
+            harpe_server::pb::GetSessionRequest {
+                session_id: session.id.clone(),
+            },
+            &user.id,
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(fetched_session.id, session.id);
+
+    let missing_summary =
+        memory_client_get_story_summary_before_update(channel.clone(), &session.id, &user.id).await;
+    assert_eq!(missing_summary.code(), Code::NotFound);
 
     let preview = session_client
         .preview_context(with_user(
@@ -752,6 +1283,17 @@ async fn grpc_send_message_streams_response_and_updates_memory() {
     assert_eq!(characters.len(), 1);
     assert_eq!(characters[0].name, "Mira");
     assert_eq!(characters[0].status, "alert");
+    let character = memory_client
+        .get_character(with_user(
+            harpe_server::pb::GetCharacterRequest {
+                character_id: characters[0].id.clone(),
+            },
+            &user.id,
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(character.name, "Mira");
 
     let facts = memory_client
         .list_world_facts(with_user(
@@ -833,6 +1375,33 @@ async fn test_store() -> SurrealStore {
         .unwrap()
 }
 
+async fn spawn_grpc_service(
+    service: HarpeGrpc,
+) -> (
+    Channel,
+    tokio::task::JoinHandle<std::result::Result<(), tonic::transport::Error>>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(
+        Server::builder()
+            .add_service(HealthServiceServer::new(service.clone()))
+            .add_service(MetricsServiceServer::new(service.clone()))
+            .add_service(UserServiceServer::new(service.clone()))
+            .add_service(GameServiceServer::new(service.clone()))
+            .add_service(SessionServiceServer::new(service.clone()))
+            .add_service(MemoryServiceServer::new(service))
+            .serve_with_incoming(TcpListenerStream::new(listener)),
+    );
+    let channel = Endpoint::from_shared(format!("http://{addr}"))
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+
+    (channel, server)
+}
+
 fn with_user<T>(message: T, user_id: &str) -> Request<T> {
     let mut request = Request::new(message);
     request.metadata_mut().insert(
@@ -840,6 +1409,42 @@ fn with_user<T>(message: T, user_id: &str) -> Request<T> {
         MetadataValue::try_from(user_id).expect("test user id is valid metadata"),
     );
     request
+}
+
+fn assert_validation(error: HarpeError, expected_message: &str) {
+    match error {
+        HarpeError::Validation(message) => assert!(
+            message.contains(expected_message),
+            "expected validation message to contain {expected_message:?}, got {message:?}"
+        ),
+        other => panic!("expected validation error, got {other:?}"),
+    }
+}
+
+fn assert_not_found(error: HarpeError, expected_message: &str) {
+    match error {
+        HarpeError::NotFound(message) => assert!(
+            message.contains(expected_message),
+            "expected not found message to contain {expected_message:?}, got {message:?}"
+        ),
+        other => panic!("expected not found error, got {other:?}"),
+    }
+}
+
+async fn memory_client_get_story_summary_before_update(
+    channel: Channel,
+    session_id: &str,
+    user_id: &str,
+) -> tonic::Status {
+    MemoryServiceClient::new(channel)
+        .get_story_summary(with_user(
+            GetStorySummaryRequest {
+                session_id: session_id.to_owned(),
+            },
+            user_id,
+        ))
+        .await
+        .unwrap_err()
 }
 
 async fn assert_relation_targets(
@@ -862,6 +1467,30 @@ async fn assert_relation_targets(
         "unexpected out record: {}",
         edges[0].out_record
     );
+}
+
+struct EmptyAssistantLlm;
+
+#[async_trait]
+impl LlmClient for EmptyAssistantLlm {
+    async fn stream_chat(&self, _request: ChatRequest) -> harpe_server::Result<TextStream> {
+        Ok(Box::pin(iter(Vec::<harpe_server::Result<String>>::new())))
+    }
+
+    async fn summarize(&self, _request: SummarizeRequest) -> harpe_server::Result<String> {
+        Ok("Empty assistant test summary.".to_owned())
+    }
+
+    async fn extract_memory(
+        &self,
+        _request: ExtractMemoryRequest,
+    ) -> harpe_server::Result<MemoryExtraction> {
+        Ok(MemoryExtraction::default())
+    }
+
+    async fn embed(&self, _text: &str) -> harpe_server::Result<Vec<f32>> {
+        Ok(vec![0.0; 16])
+    }
 }
 
 struct FlakySummarizeLlm {

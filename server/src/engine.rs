@@ -599,6 +599,38 @@ mod tests {
     }
 
     #[test]
+    fn trusted_prompt_and_entity_formatters_keep_state_readable() {
+        let now = Utc::now();
+
+        assert!(trusted_system_prompt("").starts_with("Trusted game state follows."));
+        assert!(trusted_system_prompt("Run a mystery.").starts_with("Run a mystery."));
+
+        assert_eq!(
+            format_world_fact(&WorldFact {
+                id: "fact-1".to_owned(),
+                game_id: "game-1".to_owned(),
+                subject: " silver key ".to_owned(),
+                predicate: " opens ".to_owned(),
+                object: " lower vault ".to_owned(),
+                content: " ".to_owned(),
+                confidence: 0.9,
+                updated_at: now,
+            }),
+            "- silver key opens lower vault"
+        );
+        assert_eq!(
+            format_location(&Location {
+                id: "location-1".to_owned(),
+                game_id: "game-1".to_owned(),
+                name: " Lower Vault ".to_owned(),
+                description: " ".to_owned(),
+                updated_at: now,
+            }),
+            "- Lower Vault"
+        );
+    }
+
+    #[test]
     fn cosine_similarity_handles_mismatch_and_zero_vectors() {
         assert_eq!(cosine_similarity(&[1.0], &[1.0, 0.0]), 0.0);
         assert_eq!(cosine_similarity(&[0.0, 0.0], &[1.0, 0.0]), 0.0);

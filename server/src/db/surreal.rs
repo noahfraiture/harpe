@@ -1665,4 +1665,40 @@ mod tests {
         assert_eq!(hits[0].chunk.id, "memory-1");
         assert!((hits[0].score - 1.0).abs() < 0.001);
     }
+
+    #[test]
+    fn relation_specs_cover_extraction_edge_tables() {
+        assert_eq!(
+            relation_spec(GraphRelationKind::EventInvolvesCharacter),
+            RelationSpec {
+                table: "event_involves_character",
+                in_table: "event",
+                out_table: "character",
+            }
+        );
+        assert_eq!(
+            relation_spec(GraphRelationKind::EventHappenedAtLocation),
+            RelationSpec {
+                table: "event_happened_at_location",
+                in_table: "event",
+                out_table: "location",
+            }
+        );
+        assert_eq!(
+            relation_spec(GraphRelationKind::CharacterKnowsWorldFact),
+            RelationSpec {
+                table: "character_knows_world_fact",
+                in_table: "character",
+                out_table: "world_fact",
+            }
+        );
+        assert_eq!(
+            relation_spec(GraphRelationKind::MemorySupportsWorldFact),
+            RelationSpec {
+                table: "memory_supports_world_fact",
+                in_table: "memory_chunk",
+                out_table: "world_fact",
+            }
+        );
+    }
 }

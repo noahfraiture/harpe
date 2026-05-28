@@ -166,5 +166,20 @@ mod tests {
             AppConfig::from_vars(|key| (key == "HARPE_LLM_PROVIDER").then(|| "http".to_owned()))
                 .unwrap_err();
         assert!(matches!(missing_model, HarpeError::Validation(_)));
+
+        let unsupported_provider =
+            AppConfig::from_vars(|key| (key == "HARPE_LLM_PROVIDER").then(|| "unknown".to_owned()))
+                .unwrap_err();
+        assert!(matches!(unsupported_provider, HarpeError::Validation(_)));
+
+        let invalid_interval =
+            AppConfig::from_vars(|key| (key == "HARPE_JOB_INTERVAL_MS").then(|| "fast".to_owned()))
+                .unwrap_err();
+        assert!(matches!(invalid_interval, HarpeError::Validation(_)));
+
+        let invalid_batch =
+            AppConfig::from_vars(|key| (key == "HARPE_JOB_BATCH_LIMIT").then(|| "many".to_owned()))
+                .unwrap_err();
+        assert!(matches!(invalid_batch, HarpeError::Validation(_)));
     }
 }

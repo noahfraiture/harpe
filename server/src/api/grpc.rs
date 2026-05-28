@@ -1004,10 +1004,33 @@ mod tests {
     }
 
     #[test]
-    fn permission_denied_maps_to_grpc_permission_denied() {
-        let status = status_from_error(HarpeError::PermissionDenied("game-1".to_owned()));
+    fn domain_errors_map_to_expected_grpc_status_codes() {
+        let cases = [
+            (
+                HarpeError::Validation("content".to_owned()),
+                tonic::Code::InvalidArgument,
+            ),
+            (
+                HarpeError::NotFound("summary".to_owned()),
+                tonic::Code::NotFound,
+            ),
+            (
+                HarpeError::PermissionDenied("game-1".to_owned()),
+                tonic::Code::PermissionDenied,
+            ),
+            (
+                HarpeError::Store("database".to_owned()),
+                tonic::Code::Internal,
+            ),
+            (
+                HarpeError::Llm("model".to_owned()),
+                tonic::Code::Unavailable,
+            ),
+        ];
 
-        assert_eq!(status.code(), tonic::Code::PermissionDenied);
+        for (error, code) in cases {
+            assert_eq!(status_from_error(error).code(), code);
+        }
     }
 
     #[test]

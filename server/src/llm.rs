@@ -620,6 +620,41 @@ mod tests {
         assert!((magnitude - 1.0).abs() < 0.001);
     }
 
+    #[test]
+    fn http_llm_rejects_invalid_config() {
+        let base =
+            HttpLlmConfig::openai_compatible("http://localhost", None, "chat", "extract", "embed");
+
+        assert!(matches!(
+            HttpLlm::new(HttpLlmConfig {
+                base_url: String::new(),
+                ..base.clone()
+            }),
+            Err(HarpeError::Validation(_))
+        ));
+        assert!(matches!(
+            HttpLlm::new(HttpLlmConfig {
+                chat_model: String::new(),
+                ..base.clone()
+            }),
+            Err(HarpeError::Validation(_))
+        ));
+        assert!(matches!(
+            HttpLlm::new(HttpLlmConfig {
+                extraction_model: String::new(),
+                ..base.clone()
+            }),
+            Err(HarpeError::Validation(_))
+        ));
+        assert!(matches!(
+            HttpLlm::new(HttpLlmConfig {
+                embedding_model: String::new(),
+                ..base
+            }),
+            Err(HarpeError::Validation(_))
+        ));
+    }
+
     #[tokio::test]
     async fn summarize_requires_content() {
         let llm = EchoLlm::development_default();
@@ -677,6 +712,43 @@ mod tests {
 
         assert_eq!(extraction.events[0].summary, "The old gate opens.");
         assert_eq!(extraction.events[0].importance, 3);
+    }
+
+    #[tokio::test]
+    async fn extract_memory_fallback_ignores_missing_or_blank_assistant_messages() {
+        let llm = EchoLlm::development_default();
+
+        let no_assistant = llm
+            .extract_memory(ExtractMemoryRequest {
+                game_id: "game-1".to_owned(),
+                session_id: "session-1".to_owned(),
+                messages: vec![Message {
+                    id: "message-1".to_owned(),
+                    session_id: "session-1".to_owned(),
+                    role: MessageRole::User,
+                    content: "I wait.".to_owned(),
+                    created_at: Utc::now(),
+                }],
+            })
+            .await
+            .unwrap();
+        assert_eq!(no_assistant, MemoryExtraction::default());
+
+        let blank_assistant = llm
+            .extract_memory(ExtractMemoryRequest {
+                game_id: "game-1".to_owned(),
+                session_id: "session-1".to_owned(),
+                messages: vec![Message {
+                    id: "message-2".to_owned(),
+                    session_id: "session-1".to_owned(),
+                    role: MessageRole::Assistant,
+                    content: "   ".to_owned(),
+                    created_at: Utc::now(),
+                }],
+            })
+            .await
+            .unwrap();
+        assert_eq!(blank_assistant, MemoryExtraction::default());
     }
 
     #[tokio::test]
@@ -818,6 +890,19 @@ mod tests {
 
         assert_eq!(extraction.events[0].summary, "A bell rings.");
         assert!(extraction.character_updates.is_empty());
+    }
+
+    #[test]
+    fn memory_extraction_parser_rejects_empty_and_invalid_json() {
+        assert!(matches!(
+            parse_memory_extraction(" "),
+            Err(HarpeError::Llm(message)) if message.contains("empty")
+        ));
+        assert!(matches!(
+            parse_memory_extraction("not json"),
+            Err(HarpeError::Llm(message)) if message.contains("invalid")
+        ));
+        assert!(strip_code_fence("{\"events\":[]}").is_none());
     }
 
     #[test]
