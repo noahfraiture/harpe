@@ -41,13 +41,35 @@ impl AppConfig {
             .as_str()
         {
             "echo" => AppLlmConfig::Echo,
-            "http" | "openai-compatible" => AppLlmConfig::Http(HttpLlmConfig::openai_compatible(
-                required_var(&mut var, "HARPE_LLM_BASE_URL")?,
-                var("HARPE_LLM_API_KEY"),
-                required_var(&mut var, "HARPE_LLM_CHAT_MODEL")?,
-                required_var(&mut var, "HARPE_LLM_EXTRACTION_MODEL")?,
-                required_var(&mut var, "HARPE_LLM_EMBEDDING_MODEL")?,
-            )),
+            "http" | "openai-compatible" => AppLlmConfig::Http(
+                HttpLlmConfig::openai_compatible(
+                    required_var(&mut var, "HARPE_LLM_BASE_URL")?,
+                    var("HARPE_LLM_API_KEY"),
+                    required_var(&mut var, "HARPE_LLM_CHAT_MODEL")?,
+                    required_var(&mut var, "HARPE_LLM_EXTRACTION_MODEL")?,
+                    required_var(&mut var, "HARPE_LLM_EMBEDDING_MODEL")?,
+                )
+                .with_request_policy(
+                    Duration::from_millis(parse_u64(
+                        var("HARPE_LLM_TIMEOUT_MS")
+                            .unwrap_or_else(|| "60000".to_owned())
+                            .as_str(),
+                        "HARPE_LLM_TIMEOUT_MS",
+                    )?),
+                    parse_usize(
+                        var("HARPE_LLM_MAX_RETRIES")
+                            .unwrap_or_else(|| "2".to_owned())
+                            .as_str(),
+                        "HARPE_LLM_MAX_RETRIES",
+                    )?,
+                    Duration::from_millis(parse_u64(
+                        var("HARPE_LLM_RETRY_BASE_MS")
+                            .unwrap_or_else(|| "200".to_owned())
+                            .as_str(),
+                        "HARPE_LLM_RETRY_BASE_MS",
+                    )?),
+                ),
+            ),
             provider => {
                 return Err(HarpeError::Validation(format!(
                     "unsupported HARPE_LLM_PROVIDER {provider}"
@@ -133,6 +155,9 @@ mod tests {
             ("HARPE_LLM_CHAT_MODEL", "chat"),
             ("HARPE_LLM_EXTRACTION_MODEL", "extract"),
             ("HARPE_LLM_EMBEDDING_MODEL", "embed"),
+            ("HARPE_LLM_TIMEOUT_MS", "15000"),
+            ("HARPE_LLM_MAX_RETRIES", "4"),
+            ("HARPE_LLM_RETRY_BASE_MS", "25"),
             ("HARPE_JOB_INTERVAL_MS", "500"),
             ("HARPE_JOB_BATCH_LIMIT", "7"),
         ]);
@@ -144,13 +169,20 @@ mod tests {
         assert_eq!(config.job_batch_limit, 7);
         assert_eq!(
             config.llm,
-            AppLlmConfig::Http(HttpLlmConfig::openai_compatible(
-                "http://localhost:11434",
-                Some("secret".to_owned()),
-                "chat",
-                "extract",
-                "embed",
-            ))
+            AppLlmConfig::Http(
+                HttpLlmConfig::openai_compatible(
+                    "http://localhost:11434",
+                    Some("secret".to_owned()),
+                    "chat",
+                    "extract",
+                    "embed",
+                )
+                .with_request_policy(
+                    Duration::from_millis(15000),
+                    4,
+                    Duration::from_millis(25)
+                )
+            )
         );
     }
 
@@ -181,5 +213,29 @@ mod tests {
             AppConfig::from_vars(|key| (key == "HARPE_JOB_BATCH_LIMIT").then(|| "many".to_owned()))
                 .unwrap_err();
         assert!(matches!(invalid_batch, HarpeError::Validation(_)));
+
+        let invalid_llm_timeout = AppConfig::from_vars(|key| match key {
+            "HARPE_LLM_PROVIDER" => Some("http".to_owned()),
+            "HARPE_LLM_BASE_URL" => Some("http://localhost".to_owned()),
+            "HARPE_LLM_CHAT_MODEL" => Some("chat".to_owned()),
+            "HARPE_LLM_EXTRACTION_MODEL" => Some("extract".to_owned()),
+            "HARPE_LLM_EMBEDDING_MODEL" => Some("embed".to_owned()),
+            "HARPE_LLM_TIMEOUT_MS" => Some("soon".to_owned()),
+            _ => None,
+        })
+        .unwrap_err();
+        assert!(matches!(invalid_llm_timeout, HarpeError::Validation(_)));
+
+        let invalid_llm_retries = AppConfig::from_vars(|key| match key {
+            "HARPE_LLM_PROVIDER" => Some("http".to_owned()),
+            "HARPE_LLM_BASE_URL" => Some("http://localhost".to_owned()),
+            "HARPE_LLM_CHAT_MODEL" => Some("chat".to_owned()),
+            "HARPE_LLM_EXTRACTION_MODEL" => Some("extract".to_owned()),
+            "HARPE_LLM_EMBEDDING_MODEL" => Some("embed".to_owned()),
+            "HARPE_LLM_MAX_RETRIES" => Some("often".to_owned()),
+            _ => None,
+        })
+        .unwrap_err();
+        assert!(matches!(invalid_llm_retries, HarpeError::Validation(_)));
     }
 }

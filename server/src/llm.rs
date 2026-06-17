@@ -1,9 +1,11 @@
 use std::pin::Pin;
+use std::time::Duration;
 
 use async_stream::try_stream;
 use async_trait::async_trait;
 use futures_core::Stream;
 use futures_util::StreamExt;
+use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use tokio_stream::iter;
 
@@ -51,6 +53,9 @@ pub struct HttpLlmConfig {
     pub chat_model: String,
     pub extraction_model: String,
     pub embedding_model: String,
+    pub request_timeout: Duration,
+    pub max_retries: usize,
+    pub retry_base_delay: Duration,
 }
 
 impl HttpLlmConfig {
@@ -67,7 +72,22 @@ impl HttpLlmConfig {
             chat_model: chat_model.into(),
             extraction_model: extraction_model.into(),
             embedding_model: embedding_model.into(),
+            request_timeout: Duration::from_secs(60),
+            max_retries: 2,
+            retry_base_delay: Duration::from_millis(200),
         }
+    }
+
+    pub fn with_request_policy(
+        mut self,
+        request_timeout: Duration,
+        max_retries: usize,
+        retry_base_delay: Duration,
+    ) -> Self {
+        self.request_timeout = request_timeout;
+        self.max_retries = max_retries;
+        self.retry_base_delay = retry_base_delay;
+        self
     }
 }
 
@@ -97,14 +117,20 @@ impl HttpLlm {
                 "embedding model is required".to_owned(),
             ));
         }
+        if config.request_timeout.is_zero() {
+            return Err(HarpeError::Validation(
+                "LLM request timeout must be greater than zero".to_owned(),
+            ));
+        }
 
         let mut config = config;
         config.base_url = config.base_url.trim_end_matches('/').to_owned();
+        let client = reqwest::Client::builder()
+            .timeout(config.request_timeout)
+            .build()
+            .map_err(llm_http_error)?;
 
-        Ok(Self {
-            client: reqwest::Client::new(),
-            config,
-        })
+        Ok(Self { client, config })
     }
 
     fn request(&self, path: &str) -> reqwest::RequestBuilder {
@@ -120,17 +146,55 @@ impl HttpLlm {
         request
     }
 
+    async fn send_json_with_retry<T: Serialize + Sync>(
+        &self,
+        path: &str,
+        payload: &T,
+    ) -> Result<reqwest::Response> {
+        let mut attempt = 0_usize;
+
+        loop {
+            let result = self.request(path).json(payload).send().await;
+
+            match result {
+                Ok(response) => {
+                    let status = response.status();
+                    if should_retry_status(status) && attempt < self.config.max_retries {
+                        self.sleep_before_retry(attempt).await;
+                        attempt = attempt.saturating_add(1);
+                        continue;
+                    }
+
+                    return Ok(response);
+                }
+                Err(error)
+                    if should_retry_request_error(&error) && attempt < self.config.max_retries =>
+                {
+                    self.sleep_before_retry(attempt).await;
+                    attempt = attempt.saturating_add(1);
+                }
+                Err(error) => return Err(llm_http_error(error)),
+            }
+        }
+    }
+
+    async fn sleep_before_retry(&self, attempt: usize) {
+        let multiplier = 2_u32.saturating_pow(attempt.min(8) as u32);
+        let delay = self.config.retry_base_delay.saturating_mul(multiplier);
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
+    }
+
     async fn complete_chat(&self, model: &str, messages: Vec<HttpChatMessage>) -> Result<String> {
+        let payload = ChatCompletionRequest {
+            model,
+            messages,
+            stream: false,
+        };
         let response = self
-            .request("/v1/chat/completions")
-            .json(&ChatCompletionRequest {
-                model,
-                messages,
-                stream: false,
-            })
-            .send()
-            .await
-            .map_err(llm_http_error)?;
+            .send_json_with_retry("/v1/chat/completions", &payload)
+            .await?;
 
         if !response.status().is_success() {
             return Err(response_error(response).await);
@@ -148,20 +212,18 @@ impl HttpLlm {
 #[async_trait]
 impl LlmClient for HttpLlm {
     async fn stream_chat(&self, request: ChatRequest) -> Result<TextStream> {
+        let payload = ChatCompletionRequest {
+            model: &self.config.chat_model,
+            messages: request
+                .messages
+                .into_iter()
+                .map(HttpChatMessage::from_chat_message)
+                .collect(),
+            stream: true,
+        };
         let response = self
-            .request("/v1/chat/completions")
-            .json(&ChatCompletionRequest {
-                model: &self.config.chat_model,
-                messages: request
-                    .messages
-                    .into_iter()
-                    .map(HttpChatMessage::from_chat_message)
-                    .collect(),
-                stream: true,
-            })
-            .send()
-            .await
-            .map_err(llm_http_error)?;
+            .send_json_with_retry("/v1/chat/completions", &payload)
+            .await?;
 
         if !response.status().is_success() {
             return Err(response_error(response).await);
@@ -240,15 +302,13 @@ impl LlmClient for HttpLlm {
     }
 
     async fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        let payload = EmbeddingRequest {
+            model: &self.config.embedding_model,
+            input: text,
+        };
         let response = self
-            .request("/v1/embeddings")
-            .json(&EmbeddingRequest {
-                model: &self.config.embedding_model,
-                input: text,
-            })
-            .send()
-            .await
-            .map_err(llm_http_error)?;
+            .send_json_with_retry("/v1/embeddings", &payload)
+            .await?;
 
         if !response.status().is_success() {
             return Err(response_error(response).await);
@@ -558,6 +618,14 @@ async fn response_error(response: reqwest::Response) -> HarpeError {
     HarpeError::Llm(format!("LLM HTTP {status}: {body}"))
 }
 
+fn should_retry_status(status: StatusCode) -> bool {
+    status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+}
+
+fn should_retry_request_error(error: &reqwest::Error) -> bool {
+    error.is_timeout() || error.is_connect()
+}
+
 fn llm_http_error(error: reqwest::Error) -> HarpeError {
     HarpeError::Llm(error.to_string())
 }
@@ -649,6 +717,13 @@ mod tests {
         assert!(matches!(
             HttpLlm::new(HttpLlmConfig {
                 embedding_model: String::new(),
+                ..base.clone()
+            }),
+            Err(HarpeError::Validation(_))
+        ));
+        assert!(matches!(
+            HttpLlm::new(HttpLlmConfig {
+                request_timeout: Duration::ZERO,
                 ..base
             }),
             Err(HarpeError::Validation(_))
@@ -802,17 +877,64 @@ mod tests {
     async fn http_llm_reports_non_success_status() {
         let mut mock = spawn_mock_http(vec![http_response(
             "application/json",
-            r#"{"error":"model overloaded"}"#,
-            "503 Service Unavailable",
+            r#"{"error":"bad request"}"#,
+            "400 Bad Request",
         )])
         .await;
         let llm = test_http_llm(&mock.base_url);
 
         let error = llm.embed("silver key").await.unwrap_err();
 
-        assert!(matches!(error, HarpeError::Llm(message) if message.contains("503")));
+        assert!(matches!(error, HarpeError::Llm(message) if message.contains("400")));
         let request = mock.requests.recv().await.unwrap();
         assert!(request.contains("POST /v1/embeddings"));
+    }
+
+    #[tokio::test]
+    async fn http_llm_retries_transient_status_before_success() {
+        let mut mock = spawn_mock_http(vec![
+            http_response(
+                "application/json",
+                r#"{"error":"temporarily overloaded"}"#,
+                "503 Service Unavailable",
+            ),
+            json_response(r#"{"data":[{"embedding":[0.5,0.5]}]}"#),
+        ])
+        .await;
+        let llm = test_http_llm_with_policy(&mock.base_url, 1, Duration::ZERO);
+
+        let embedding = llm.embed("retryable input").await.unwrap();
+
+        assert_eq!(embedding, vec![0.5, 0.5]);
+        let first_request = mock.requests.recv().await.unwrap();
+        let second_request = mock.requests.recv().await.unwrap();
+        assert!(first_request.contains("POST /v1/embeddings"));
+        assert!(second_request.contains("POST /v1/embeddings"));
+    }
+
+    #[tokio::test]
+    async fn http_llm_does_not_retry_client_errors() {
+        let mut mock = spawn_mock_http(vec![
+            http_response(
+                "application/json",
+                r#"{"error":"bad request"}"#,
+                "400 Bad Request",
+            ),
+            json_response(r#"{"data":[{"embedding":[1.0]}]}"#),
+        ])
+        .await;
+        let llm = test_http_llm_with_policy(&mock.base_url, 2, Duration::ZERO);
+
+        let error = llm.embed("bad input").await.unwrap_err();
+
+        assert!(matches!(error, HarpeError::Llm(message) if message.contains("400")));
+        let request = mock.requests.recv().await.unwrap();
+        assert!(request.contains("POST /v1/embeddings"));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), mock.requests.recv())
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -985,13 +1107,24 @@ mod tests {
     }
 
     fn test_http_llm(base_url: &str) -> HttpLlm {
-        HttpLlm::new(HttpLlmConfig::openai_compatible(
-            base_url,
-            Some("test-key".to_owned()),
-            "chat-model",
-            "extraction-model",
-            "embedding-model",
-        ))
+        test_http_llm_with_policy(base_url, 2, Duration::from_millis(200))
+    }
+
+    fn test_http_llm_with_policy(
+        base_url: &str,
+        max_retries: usize,
+        retry_base_delay: Duration,
+    ) -> HttpLlm {
+        HttpLlm::new(
+            HttpLlmConfig::openai_compatible(
+                base_url,
+                Some("test-key".to_owned()),
+                "chat-model",
+                "extraction-model",
+                "embedding-model",
+            )
+            .with_request_policy(Duration::from_secs(5), max_retries, retry_base_delay),
+        )
         .unwrap()
     }
 

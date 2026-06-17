@@ -40,6 +40,9 @@ For an OpenAI-compatible provider, set:
 - `HARPE_LLM_CHAT_MODEL`
 - `HARPE_LLM_EXTRACTION_MODEL`
 - `HARPE_LLM_EMBEDDING_MODEL`
+- `HARPE_LLM_TIMEOUT_MS`, default `60000`
+- `HARPE_LLM_MAX_RETRIES`, default `2`
+- `HARPE_LLM_RETRY_BASE_MS`, default `200`
 
 To run the server with SurrealDB:
 
