@@ -8,7 +8,7 @@ The current milestone is a Rust gRPC server with:
 - SurrealDB storage through the Rust SDK with versioned migrations, schemafull tables, and graph relation tables
 - an LLM abstraction with a deterministic development implementation and an OpenAI-compatible HTTP adapter
 - structured memory extraction for events, character updates, world facts, and locations
-- a budget-aware context builder that ranks story summary, recent events, memories, character state, world facts, locations, and recent messages
+- a model-aware, budget-aware context builder that ranks story summary, recent events, memories, character state, world facts, locations, and recent messages
 - durable background jobs for turn memory updates with retry/backoff
 - `x-user-id` gRPC metadata checks for user-owned game/session data
 - SurrealDB full-text memory indexing plus optional HNSW vector lookup for 16-dimensional embeddings
@@ -31,6 +31,10 @@ Defaults:
 - `SURREALDB_DATABASE=dev`
 - `SURREALDB_USERNAME` and `SURREALDB_PASSWORD` are optional; set both when connecting to an authenticated SurrealDB server
 - `HARPE_LLM_PROVIDER=echo`
+- `HARPE_CONTEXT_MODEL` optionally overrides the model name used for context/token presets
+- `HARPE_CONTEXT_WINDOW_TOKENS` optionally overrides the max context window
+- `HARPE_RESPONSE_RESERVE_TOKENS` optionally overrides reserved response tokens
+- `HARPE_TOKENIZER_PROFILE` optionally forces `generic`, `openai`, `anthropic`, `llama`, or `mistral`
 - `HARPE_JOB_INTERVAL_MS=2000`
 - `HARPE_JOB_BATCH_LIMIT=25`
 

@@ -10,6 +10,7 @@ use crate::Result;
 use crate::api::grpc::HarpeGrpc;
 use crate::config::{AppConfig, AppLlmConfig};
 use crate::db::surreal::{SurrealCredentials, SurrealStore};
+use crate::engine::{ContextBudget, ContextBuilder, TokenEstimator};
 use crate::jobs::JobRunner;
 use crate::llm::{EchoLlm, HttpLlm, LlmClient};
 use crate::observability::{AppMetrics, SharedMetrics};
@@ -43,7 +44,8 @@ pub async fn build_runtime_parts(config: &AppConfig) -> Result<RuntimeParts> {
     let llm = llm_from_config(config.llm.clone())?;
     let metrics = AppMetrics::shared();
     let service_store: Arc<dyn HarpeStore> = store.clone();
-    let service = grpc_service(service_store, llm.clone(), metrics.clone());
+    let service = grpc_service(service_store, llm.clone(), metrics.clone())
+        .with_context_builder(context_builder_from_config(config));
 
     Ok(RuntimeParts {
         store,
@@ -78,6 +80,46 @@ pub fn llm_from_config(config: AppLlmConfig) -> Result<Arc<dyn LlmClient>> {
     match config {
         AppLlmConfig::Echo => Ok(Arc::new(EchoLlm::development_default())),
         AppLlmConfig::Http(http_config) => Ok(Arc::new(HttpLlm::new(http_config)?)),
+    }
+}
+
+pub fn context_builder_from_config(config: &AppConfig) -> ContextBuilder {
+    let model_name = config
+        .context
+        .model_name
+        .as_deref()
+        .or_else(|| chat_model_name(&config.llm));
+    let mut builder = model_name
+        .map(ContextBuilder::for_model)
+        .unwrap_or_default();
+
+    if let Some(profile) = config.context.tokenizer_profile {
+        builder = builder.with_token_estimator(TokenEstimator { profile });
+    }
+
+    if config.context.max_context_tokens.is_some()
+        || config.context.reserved_response_tokens.is_some()
+    {
+        let mut budget = builder.budget.clone();
+        if let Some(max_context_tokens) = config.context.max_context_tokens {
+            budget.max_context_tokens = max_context_tokens;
+        }
+        if let Some(reserved_response_tokens) = config.context.reserved_response_tokens {
+            budget.reserved_response_tokens = reserved_response_tokens;
+        }
+        builder = builder.with_budget(ContextBudget {
+            max_context_tokens: budget.max_context_tokens,
+            reserved_response_tokens: budget.reserved_response_tokens,
+        });
+    }
+
+    builder
+}
+
+fn chat_model_name(config: &AppLlmConfig) -> Option<&str> {
+    match config {
+        AppLlmConfig::Echo => None,
+        AppLlmConfig::Http(http) => Some(http.chat_model.as_str()),
     }
 }
 
@@ -157,6 +199,8 @@ mod tests {
 
     use super::*;
     use crate::HarpeError;
+    use crate::config::AppContextConfig;
+    use crate::engine::TokenizerProfile;
     use crate::llm::HttpLlmConfig;
 
     fn memory_config() -> AppConfig {
@@ -168,6 +212,7 @@ mod tests {
             surreal_username: None,
             surreal_password: None,
             llm: AppLlmConfig::Echo,
+            context: AppContextConfig::default(),
             job_interval: Duration::from_millis(50),
             job_batch_limit: 2,
         }
@@ -188,6 +233,35 @@ mod tests {
             llm_from_config(invalid_http),
             Err(HarpeError::Validation(_))
         ));
+    }
+
+    #[test]
+    fn context_builder_from_config_uses_model_defaults_and_overrides() {
+        let mut config = memory_config();
+        config.llm = AppLlmConfig::Http(HttpLlmConfig::openai_compatible(
+            "http://localhost",
+            None,
+            "gpt-4o-128k",
+            "extract",
+            "embed",
+        ));
+        let inferred = context_builder_from_config(&config);
+        assert_eq!(inferred.token_estimator.profile, TokenizerProfile::OpenAi);
+        assert_eq!(inferred.budget.max_context_tokens, 128_000);
+
+        config.context = AppContextConfig {
+            model_name: Some("claude-sonnet-200k".to_owned()),
+            max_context_tokens: Some(64_000),
+            reserved_response_tokens: Some(4_096),
+            tokenizer_profile: Some(TokenizerProfile::Anthropic),
+        };
+        let overridden = context_builder_from_config(&config);
+        assert_eq!(
+            overridden.token_estimator.profile,
+            TokenizerProfile::Anthropic
+        );
+        assert_eq!(overridden.budget.max_context_tokens, 64_000);
+        assert_eq!(overridden.budget.reserved_response_tokens, 4_096);
     }
 
     #[test]

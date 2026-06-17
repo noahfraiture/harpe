@@ -11,7 +11,7 @@ use crate::domain::{
     MemoryHit, Message, MessageRole, NewGame, NewMessage, NewSession, NewUser, Session,
     StorySummary, User, WorldFact, new_id,
 };
-use crate::engine::{ContextBuilder, ContextInputs, estimate_tokens};
+use crate::engine::{ContextBuilder, ContextInputs};
 use crate::jobs::{UpdateMemoryAfterTurnPayload, new_update_memory_job};
 use crate::llm::{ChatRequest, LlmClient};
 use crate::observability::{AppMetrics, MetricsSnapshot as AppMetricsSnapshot, SharedMetrics};
@@ -296,7 +296,7 @@ impl session_service_server::SessionService for HarpeGrpc {
         )
         .await
         .map_err(status_from_error)?;
-        let response = preview_context_to_pb(chat_request);
+        let response = preview_context_to_pb(chat_request, &self.context_builder);
 
         Ok(Response::new(response))
     }
@@ -1119,13 +1119,16 @@ fn metrics_to_pb(snapshot: AppMetricsSnapshot) -> pb::MetricsSnapshot {
     }
 }
 
-fn preview_context_to_pb(chat_request: ChatRequest) -> pb::PreviewContextResponse {
+fn preview_context_to_pb(
+    chat_request: ChatRequest,
+    context_builder: &ContextBuilder,
+) -> pb::PreviewContextResponse {
     let mut estimated_total = 0_usize;
     let messages = chat_request
         .messages
         .into_iter()
         .map(|message| {
-            let estimated = estimate_tokens(&message.content);
+            let estimated = context_builder.estimate_tokens(&message.content);
             estimated_total = estimated_total.saturating_add(estimated);
 
             ContextMessage {
@@ -1214,18 +1217,21 @@ mod tests {
 
     #[test]
     fn preview_context_response_includes_token_estimates() {
-        let response = preview_context_to_pb(ChatRequest {
-            messages: vec![
-                ChatMessage {
-                    role: MessageRole::System,
-                    content: "Trusted state.".to_owned(),
-                },
-                ChatMessage {
-                    role: MessageRole::User,
-                    content: "I open the gate.".to_owned(),
-                },
-            ],
-        });
+        let response = preview_context_to_pb(
+            ChatRequest {
+                messages: vec![
+                    ChatMessage {
+                        role: MessageRole::System,
+                        content: "Trusted state.".to_owned(),
+                    },
+                    ChatMessage {
+                        role: MessageRole::User,
+                        content: "I open the gate.".to_owned(),
+                    },
+                ],
+            },
+            &ContextBuilder::default(),
+        );
 
         assert_eq!(response.messages.len(), 2);
         assert!(response.estimated_tokens >= response.messages[0].estimated_tokens);

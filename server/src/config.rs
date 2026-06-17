@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use crate::engine::TokenizerProfile;
 use crate::llm::HttpLlmConfig;
 use crate::{HarpeError, Result};
 
@@ -13,6 +14,7 @@ pub struct AppConfig {
     pub surreal_username: Option<String>,
     pub surreal_password: Option<String>,
     pub llm: AppLlmConfig,
+    pub context: AppContextConfig,
     pub job_interval: Duration,
     pub job_batch_limit: usize,
 }
@@ -21,6 +23,14 @@ pub struct AppConfig {
 pub enum AppLlmConfig {
     Echo,
     Http(HttpLlmConfig),
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AppContextConfig {
+    pub model_name: Option<String>,
+    pub max_context_tokens: Option<usize>,
+    pub reserved_response_tokens: Option<usize>,
+    pub tokenizer_profile: Option<TokenizerProfile>,
 }
 
 impl AppConfig {
@@ -85,6 +95,21 @@ impl AppConfig {
                 )));
             }
         };
+        let context = AppContextConfig {
+            model_name: optional_non_empty(var("HARPE_CONTEXT_MODEL")),
+            max_context_tokens: optional_parse_usize(
+                var("HARPE_CONTEXT_WINDOW_TOKENS"),
+                "HARPE_CONTEXT_WINDOW_TOKENS",
+            )?,
+            reserved_response_tokens: optional_parse_usize(
+                var("HARPE_RESPONSE_RESERVE_TOKENS"),
+                "HARPE_RESPONSE_RESERVE_TOKENS",
+            )?,
+            tokenizer_profile: optional_tokenizer_profile(
+                var("HARPE_TOKENIZER_PROFILE"),
+                "HARPE_TOKENIZER_PROFILE",
+            )?,
+        };
 
         Ok(Self {
             grpc_addr,
@@ -94,6 +119,7 @@ impl AppConfig {
             surreal_username,
             surreal_password,
             llm,
+            context,
             job_interval: Duration::from_millis(parse_u64(
                 var("HARPE_JOB_INTERVAL_MS")
                     .unwrap_or_else(|| "2000".to_owned())
@@ -144,6 +170,34 @@ fn parse_usize(value: &str, key: &str) -> Result<usize> {
         .map_err(|error| HarpeError::Validation(format!("{key} is invalid: {error}")))
 }
 
+fn optional_parse_usize(value: Option<String>, key: &str) -> Result<Option<usize>> {
+    let Some(value) = optional_non_empty(value) else {
+        return Ok(None);
+    };
+
+    parse_usize(&value, key).map(Some)
+}
+
+fn optional_tokenizer_profile(
+    value: Option<String>,
+    key: &str,
+) -> Result<Option<TokenizerProfile>> {
+    let Some(value) = optional_non_empty(value) else {
+        return Ok(None);
+    };
+
+    match value.trim().to_ascii_lowercase().as_str() {
+        "generic" => Ok(Some(TokenizerProfile::Generic)),
+        "openai" | "openai-compatible" => Ok(Some(TokenizerProfile::OpenAi)),
+        "anthropic" | "claude" => Ok(Some(TokenizerProfile::Anthropic)),
+        "llama" => Ok(Some(TokenizerProfile::Llama)),
+        "mistral" | "mixtral" => Ok(Some(TokenizerProfile::Mistral)),
+        profile => Err(HarpeError::Validation(format!(
+            "{key} is invalid: unsupported tokenizer profile {profile}"
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -161,6 +215,7 @@ mod tests {
         assert_eq!(config.surreal_username, None);
         assert_eq!(config.surreal_password, None);
         assert_eq!(config.llm, AppLlmConfig::Echo);
+        assert_eq!(config.context, AppContextConfig::default());
         assert_eq!(config.job_interval, Duration::from_secs(2));
         assert_eq!(config.job_batch_limit, 25);
     }
@@ -180,6 +235,10 @@ mod tests {
             ("HARPE_LLM_TIMEOUT_MS", "15000"),
             ("HARPE_LLM_MAX_RETRIES", "4"),
             ("HARPE_LLM_RETRY_BASE_MS", "25"),
+            ("HARPE_CONTEXT_MODEL", "claude-sonnet-200k"),
+            ("HARPE_CONTEXT_WINDOW_TOKENS", "64000"),
+            ("HARPE_RESPONSE_RESERVE_TOKENS", "4096"),
+            ("HARPE_TOKENIZER_PROFILE", "anthropic"),
             ("HARPE_JOB_INTERVAL_MS", "500"),
             ("HARPE_JOB_BATCH_LIMIT", "7"),
         ]);
@@ -191,6 +250,15 @@ mod tests {
         assert_eq!(config.surreal_password.as_deref(), Some("root"));
         assert_eq!(config.job_interval, Duration::from_millis(500));
         assert_eq!(config.job_batch_limit, 7);
+        assert_eq!(
+            config.context,
+            AppContextConfig {
+                model_name: Some("claude-sonnet-200k".to_owned()),
+                max_context_tokens: Some(64_000),
+                reserved_response_tokens: Some(4_096),
+                tokenizer_profile: Some(TokenizerProfile::Anthropic),
+            }
+        );
         assert_eq!(
             config.llm,
             AppLlmConfig::Http(
@@ -281,5 +349,17 @@ mod tests {
         })
         .unwrap_err();
         assert!(matches!(invalid_retry_base, HarpeError::Validation(_)));
+
+        let invalid_context_window = AppConfig::from_vars(|key| {
+            (key == "HARPE_CONTEXT_WINDOW_TOKENS").then(|| "huge".to_owned())
+        })
+        .unwrap_err();
+        assert!(matches!(invalid_context_window, HarpeError::Validation(_)));
+
+        let invalid_tokenizer = AppConfig::from_vars(|key| {
+            (key == "HARPE_TOKENIZER_PROFILE").then(|| "alien".to_owned())
+        })
+        .unwrap_err();
+        assert!(matches!(invalid_tokenizer, HarpeError::Validation(_)));
     }
 }

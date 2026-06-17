@@ -9,6 +9,7 @@ pub struct ContextBuilder {
     pub memory_limit: usize,
     pub character_limit: usize,
     pub budget: ContextBudget,
+    pub token_estimator: TokenEstimator,
 }
 
 impl Default for ContextBuilder {
@@ -18,7 +19,28 @@ impl Default for ContextBuilder {
             memory_limit: 8,
             character_limit: 12,
             budget: ContextBudget::default(),
+            token_estimator: TokenEstimator::default(),
         }
+    }
+}
+
+impl ContextBuilder {
+    pub fn for_model(model_name: &str) -> Self {
+        Self {
+            budget: ContextBudget::for_model(model_name),
+            token_estimator: TokenEstimator::for_model(model_name),
+            ..Self::default()
+        }
+    }
+
+    pub fn with_budget(mut self, budget: ContextBudget) -> Self {
+        self.budget = budget;
+        self
+    }
+
+    pub fn with_token_estimator(mut self, token_estimator: TokenEstimator) -> Self {
+        self.token_estimator = token_estimator;
+        self
     }
 }
 
@@ -33,6 +55,16 @@ impl ContextBudget {
         self.max_context_tokens
             .saturating_sub(self.reserved_response_tokens)
     }
+
+    pub fn for_model(model_name: &str) -> Self {
+        let mut budget = Self::default();
+        if let Some(max_context_tokens) = context_window_from_model_name(model_name) {
+            budget.max_context_tokens = max_context_tokens;
+            budget.reserved_response_tokens = response_reserve_for_context(max_context_tokens);
+        }
+
+        budget
+    }
 }
 
 impl Default for ContextBudget {
@@ -41,6 +73,51 @@ impl Default for ContextBudget {
             max_context_tokens: 32_000,
             reserved_response_tokens: 2_000,
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TokenizerProfile {
+    #[default]
+    Generic,
+    OpenAi,
+    Anthropic,
+    Llama,
+    Mistral,
+}
+
+impl TokenizerProfile {
+    pub fn for_model(model_name: &str) -> Self {
+        let model = model_name.trim().to_ascii_lowercase();
+
+        if model.contains("claude") {
+            Self::Anthropic
+        } else if model.contains("llama") {
+            Self::Llama
+        } else if model.contains("mistral") || model.contains("mixtral") {
+            Self::Mistral
+        } else if model.contains("gpt") || model.starts_with('o') {
+            Self::OpenAi
+        } else {
+            Self::Generic
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TokenEstimator {
+    pub profile: TokenizerProfile,
+}
+
+impl TokenEstimator {
+    pub fn for_model(model_name: &str) -> Self {
+        Self {
+            profile: TokenizerProfile::for_model(model_name),
+        }
+    }
+
+    pub fn estimate(&self, content: &str) -> usize {
+        estimate_tokens_with_profile(content, self.profile)
     }
 }
 
@@ -82,7 +159,7 @@ impl ContextBuilder {
             self.select_recent_messages(&input.recent_messages, prompt_budget / 2);
         let message_tokens = selected_messages
             .iter()
-            .map(|message| estimate_tokens(&message.content))
+            .map(|message| self.estimate_tokens(&message.content))
             .sum::<usize>();
         let system_budget = prompt_budget.saturating_sub(message_tokens);
         let mut messages = vec![ChatMessage {
@@ -100,7 +177,7 @@ impl ContextBuilder {
 
     fn system_context(&self, input: &ContextInputs, token_budget: usize) -> String {
         let base_prompt = trusted_system_prompt(&input.base_system_prompt);
-        let base_tokens = estimate_tokens(&base_prompt);
+        let base_tokens = self.estimate_tokens(&base_prompt);
         let mut remaining_budget = token_budget.saturating_sub(base_tokens);
         let mut selected = Vec::new();
 
@@ -131,6 +208,7 @@ impl ContextBuilder {
                 summary.content.trim(),
                 900,
                 candidates.len(),
+                self.token_estimator,
             ));
         }
 
@@ -144,6 +222,7 @@ impl ContextBuilder {
                 &format!("- {}", event.summary.trim()),
                 600 + event.importance.clamp(1, 5) * 10,
                 candidates.len(),
+                self.token_estimator,
             ));
         }
 
@@ -158,6 +237,7 @@ impl ContextBuilder {
                 &format!("- [{}] {}", hit.chunk.kind, hit.chunk.content.trim()),
                 700 + (hit.score.clamp(0.0, 1.0) * 100.0).round() as i32,
                 candidates.len(),
+                self.token_estimator,
             ));
         }
 
@@ -172,6 +252,7 @@ impl ContextBuilder {
                 &format_character(character),
                 650,
                 candidates.len(),
+                self.token_estimator,
             ));
         }
 
@@ -185,6 +266,7 @@ impl ContextBuilder {
                 &format_world_fact(fact),
                 550 + (fact.confidence.clamp(0.0, 1.0) * 100.0).round() as i32,
                 candidates.len(),
+                self.token_estimator,
             ));
         }
 
@@ -198,6 +280,7 @@ impl ContextBuilder {
                 &format_location(location),
                 400,
                 candidates.len(),
+                self.token_estimator,
             ));
         }
 
@@ -217,7 +300,7 @@ impl ContextBuilder {
         let mut remaining_budget = token_budget;
 
         for message in messages.iter().rev().take(self.recent_message_limit) {
-            let estimated_tokens = estimate_tokens(&message.content);
+            let estimated_tokens = self.estimate_tokens(&message.content);
             if estimated_tokens <= remaining_budget {
                 remaining_budget -= estimated_tokens;
                 selected.push(message.clone());
@@ -227,6 +310,10 @@ impl ContextBuilder {
         selected.reverse();
         selected
     }
+
+    pub fn estimate_tokens(&self, content: &str) -> usize {
+        self.token_estimator.estimate(content)
+    }
 }
 
 fn candidate(
@@ -234,12 +321,13 @@ fn candidate(
     content: &str,
     priority: i32,
     insertion_index: usize,
+    token_estimator: TokenEstimator,
 ) -> ContextCandidate {
     let content = content.trim().to_owned();
 
     ContextCandidate {
         kind,
-        estimated_tokens: estimate_tokens(&content) + 4,
+        estimated_tokens: token_estimator.estimate(&content) + 4,
         content,
         priority,
         insertion_index,
@@ -295,8 +383,75 @@ fn section_title(kind: ContextKind) -> &'static str {
 }
 
 pub fn estimate_tokens(content: &str) -> usize {
+    TokenEstimator::default().estimate(content)
+}
+
+fn estimate_tokens_with_profile(content: &str, profile: TokenizerProfile) -> usize {
     let chars = content.chars().count();
-    chars.div_ceil(4).max(1)
+    let words = content.split_whitespace().count();
+    let punctuation = content
+        .chars()
+        .filter(|char| char.is_ascii_punctuation())
+        .count();
+    let non_ascii = content
+        .chars()
+        .filter(|char| !char.is_ascii() && !char.is_whitespace())
+        .count();
+    let chars_per_token_x10 = match profile {
+        TokenizerProfile::Generic | TokenizerProfile::OpenAi => 40,
+        TokenizerProfile::Anthropic => 38,
+        TokenizerProfile::Llama => 32,
+        TokenizerProfile::Mistral => 34,
+    };
+    let punctuation_divisor = match profile {
+        TokenizerProfile::Generic => 3,
+        TokenizerProfile::OpenAi | TokenizerProfile::Anthropic => 2,
+        TokenizerProfile::Llama | TokenizerProfile::Mistral => 1,
+    };
+    let char_estimate = (chars * 10).div_ceil(chars_per_token_x10);
+    let lexical_estimate = words
+        .saturating_add(punctuation.div_ceil(punctuation_divisor))
+        .saturating_add(non_ascii);
+
+    char_estimate.max(lexical_estimate).max(1)
+}
+
+fn context_window_from_model_name(model_name: &str) -> Option<usize> {
+    let model = model_name.trim().to_ascii_lowercase();
+    if model.is_empty() {
+        return None;
+    }
+
+    [
+        ("1000k", 1_000_000),
+        ("1m", 1_000_000),
+        ("200k", 200_000),
+        ("128k", 128_000),
+        ("64k", 64_000),
+        ("32k", 32_000),
+        ("16k", 16_000),
+        ("8k", 8_000),
+        ("4k", 4_000),
+    ]
+    .into_iter()
+    .find_map(|(needle, tokens)| model.contains(needle).then_some(tokens))
+    .or_else(|| {
+        if model.contains("claude") {
+            Some(200_000)
+        } else if model.contains("gpt-4.1") {
+            Some(1_000_000)
+        } else if model.contains("gpt-4o") || model.starts_with("o3") || model.starts_with("o4") {
+            Some(128_000)
+        } else if model.contains("gpt") {
+            Some(32_000)
+        } else {
+            None
+        }
+    })
+}
+
+fn response_reserve_for_context(max_context_tokens: usize) -> usize {
+    (max_context_tokens / 16).clamp(1_000, 8_000)
 }
 
 fn format_character(character: &Character) -> String {
@@ -375,6 +530,7 @@ mod tests {
             memory_limit: 1,
             character_limit: 1,
             budget: ContextBudget::default(),
+            token_estimator: TokenEstimator::default(),
         };
 
         let chat = builder.build(ContextInputs {
@@ -473,6 +629,7 @@ mod tests {
                 max_context_tokens: 64,
                 reserved_response_tokens: 0,
             },
+            token_estimator: TokenEstimator::default(),
         };
 
         let chat = builder.build(ContextInputs {
@@ -520,6 +677,7 @@ mod tests {
                 max_context_tokens: 32,
                 reserved_response_tokens: 0,
             },
+            token_estimator: TokenEstimator::default(),
         };
 
         let chat = builder.build(ContextInputs {
@@ -592,10 +750,30 @@ mod tests {
     }
 
     #[test]
-    fn estimate_tokens_uses_conservative_character_estimate() {
+    fn estimate_tokens_uses_model_aware_conservative_estimate() {
         assert_eq!(estimate_tokens(""), 1);
         assert_eq!(estimate_tokens("abcd"), 1);
         assert_eq!(estimate_tokens("abcde"), 2);
+
+        let openai = TokenEstimator::for_model("gpt-4o");
+        let llama = TokenEstimator::for_model("llama-3-8b");
+        let punctuated = "Mira: wait... now!";
+        assert_eq!(openai.profile, TokenizerProfile::OpenAi);
+        assert_eq!(llama.profile, TokenizerProfile::Llama);
+        assert!(llama.estimate(punctuated) >= openai.estimate(punctuated));
+    }
+
+    #[test]
+    fn context_builder_uses_model_context_window_presets() {
+        let claude = ContextBuilder::for_model("claude-sonnet-200k");
+        assert_eq!(claude.token_estimator.profile, TokenizerProfile::Anthropic);
+        assert_eq!(claude.budget.max_context_tokens, 200_000);
+        assert_eq!(claude.budget.reserved_response_tokens, 8_000);
+
+        let local = ContextBuilder::for_model("llama-3-8k");
+        assert_eq!(local.token_estimator.profile, TokenizerProfile::Llama);
+        assert_eq!(local.budget.max_context_tokens, 8_000);
+        assert_eq!(local.budget.reserved_response_tokens, 1_000);
     }
 
     #[test]
