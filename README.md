@@ -74,3 +74,16 @@ HARPE_PERSISTENT_SURREALDB_USERNAME=root \
 HARPE_PERSISTENT_SURREALDB_PASSWORD=root \
 cargo test -p harpe-server --test persistent_surreal -- --ignored
 ```
+
+The GitHub Actions workflow also runs this persistent SurrealDB test on a weekly schedule and on manual dispatch.
+
+To run the ignored OpenAI-compatible provider conformance test, set real provider details:
+
+```sh
+HARPE_PROVIDER_CONFORMANCE_BASE_URL=https://provider.example/v1-compatible-root \
+HARPE_PROVIDER_CONFORMANCE_API_KEY=... \
+HARPE_PROVIDER_CONFORMANCE_CHAT_MODEL=... \
+HARPE_PROVIDER_CONFORMANCE_EXTRACTION_MODEL=... \
+HARPE_PROVIDER_CONFORMANCE_EMBEDDING_MODEL=... \
+cargo test -p harpe-server --test provider_conformance -- --ignored
+```

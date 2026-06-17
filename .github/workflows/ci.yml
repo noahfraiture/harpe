@@ -6,6 +6,8 @@ on:
       - main
   pull_request:
   workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * 1"
 
 permissions:
   contents: read
@@ -51,3 +53,43 @@ jobs:
 
       - name: Coverage
         run: cargo llvm-cov --workspace --all-targets --locked --fail-under-lines 95
+
+  persistent-surreal:
+    name: Persistent SurrealDB
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Start SurrealDB
+        run: |
+          docker run --detach --name harpe-surrealdb \
+            --publish 8000:8000 \
+            surrealdb/surrealdb:v3.0.5 \
+            start --user root --pass root rocksdb:/tmp/harpe-ci.db
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent --show-error http://127.0.0.1:8000/health >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs harpe-surrealdb
+          exit 1
+
+      - name: Run persistent SurrealDB test
+        env:
+          HARPE_PERSISTENT_SURREALDB_ENDPOINT: ws://127.0.0.1:8000
+          HARPE_PERSISTENT_SURREALDB_USERNAME: root
+          HARPE_PERSISTENT_SURREALDB_PASSWORD: root
+        run: cargo test -p harpe-server --test persistent_surreal -- --ignored
