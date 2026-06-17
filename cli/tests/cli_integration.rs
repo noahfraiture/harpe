@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use clap::Parser;
-use harpe_cli::{Cli, execute};
+use harpe_cli::{Cli, CliResult, execute};
 use harpe_server::api::grpc::HarpeGrpc;
 use harpe_server::db::surreal::SurrealStore;
 use harpe_server::domain::{
@@ -64,6 +64,9 @@ async fn cli_drives_core_roleplay_flow_against_real_grpc_server() {
     let user_id = user["id"].as_str().unwrap().to_owned();
     assert_eq!(user["display_name"], "Noah");
 
+    let fetched_user = run_json(&addr, None, &["user", "get", &user_id]).await;
+    assert_eq!(fetched_user["id"], user_id);
+
     let game = run_json(
         &addr,
         Some(&user_id),
@@ -86,6 +89,39 @@ async fn cli_drives_core_roleplay_flow_against_real_grpc_server() {
 
     let fetched_game = run_json(&addr, Some(&user_id), &["game", "get", &game_id]).await;
     assert_eq!(fetched_game["id"], game_id);
+
+    let prompt_path = temp_path("system-prompt.txt");
+    std::fs::write(&prompt_path, "Run a game from a prompt file.").unwrap();
+    let prompt_path_str = prompt_path.to_str().unwrap();
+    let prompt_file_game = run_json(
+        &addr,
+        Some(&user_id),
+        &[
+            "game",
+            "create",
+            "--title",
+            "Prompt File Coast",
+            "--system-prompt-file",
+            prompt_path_str,
+        ],
+    )
+    .await;
+    assert_eq!(
+        prompt_file_game["system_prompt"],
+        "Run a game from a prompt file."
+    );
+    std::fs::remove_file(prompt_path).unwrap();
+
+    let stranger = run_json(&addr, None, &["user", "create", "--name", "Kest"]).await;
+    let permission_error = run_cli_result(
+        &addr,
+        stranger["id"].as_str(),
+        true,
+        &["game", "get", &game_id],
+    )
+    .await
+    .unwrap_err();
+    assert_error_contains(permission_error.as_ref(), "permission");
 
     let session = run_json(
         &addr,
@@ -326,6 +362,80 @@ async fn cli_drives_core_roleplay_flow_against_real_grpc_server() {
     let metrics_export = run_text(&addr, None, &["metrics", "export"]).await;
     assert!(metrics_export.contains("harpe_grpc_requests_total"));
 
+    let metrics_path = temp_path("metrics.prom");
+    let metrics_path_str = metrics_path.to_str().unwrap();
+    let metrics_file = run_json(
+        &addr,
+        None,
+        &["metrics", "export", "--out", metrics_path_str],
+    )
+    .await;
+    assert_eq!(metrics_file["metrics_path"], metrics_path_str);
+    assert!(
+        std::fs::read_to_string(&metrics_path)
+            .unwrap()
+            .contains("harpe_grpc_requests_total")
+    );
+    std::fs::remove_file(metrics_path).unwrap();
+
+    let backup_path = temp_path("backup.json");
+    let backup_path_str = backup_path.to_str().unwrap();
+    let backup_file = run_json(
+        &addr,
+        Some(&user_id),
+        &[
+            "backup",
+            "export",
+            "--game",
+            &game_id,
+            "--out",
+            backup_path_str,
+        ],
+    )
+    .await;
+    assert_eq!(backup_file["backup_path"], backup_path_str);
+    let backup_file_json: Value =
+        serde_json::from_str(&std::fs::read_to_string(&backup_path).unwrap()).unwrap();
+    assert_eq!(backup_file_json["game"]["id"], game_id);
+    std::fs::remove_file(backup_path).unwrap();
+
+    let backup_stream_path = temp_path("backup.ndjson");
+    let backup_stream_path_str = backup_stream_path.to_str().unwrap();
+    let backup_stream_file = run_json(
+        &addr,
+        Some(&user_id),
+        &[
+            "backup",
+            "stream",
+            "--game",
+            &game_id,
+            "--out",
+            backup_stream_path_str,
+        ],
+    )
+    .await;
+    assert_eq!(
+        backup_stream_file["backup_stream_path"],
+        backup_stream_path_str
+    );
+    let backup_stream_file = std::fs::read_to_string(&backup_stream_path).unwrap();
+    assert!(backup_stream_file.lines().count() >= 2);
+    assert_eq!(
+        serde_json::from_str::<Value>(backup_stream_file.lines().next().unwrap()).unwrap()["kind"],
+        "game"
+    );
+    std::fs::remove_file(backup_stream_path).unwrap();
+
+    let missing_user = run_cli_result(&addr, None, true, &["user", "get", "missing-user"])
+        .await
+        .unwrap_err();
+    assert_error_contains(missing_user.as_ref(), "not found");
+
+    let validation_error = run_cli_result(&addr, None, true, &["user", "create", "--name", " "])
+        .await
+        .unwrap_err();
+    assert_error_contains(validation_error.as_ref(), "invalid");
+
     server.abort();
 }
 
@@ -339,6 +449,15 @@ async fn run_text(addr: &str, user_id: Option<&str>, args: &[&str]) -> String {
 }
 
 async fn run_cli(addr: &str, user_id: Option<&str>, as_json: bool, args: &[&str]) -> Vec<u8> {
+    run_cli_result(addr, user_id, as_json, args).await.unwrap()
+}
+
+async fn run_cli_result(
+    addr: &str,
+    user_id: Option<&str>,
+    as_json: bool,
+    args: &[&str],
+) -> CliResult<Vec<u8>> {
     let mut argv = vec!["harpe".to_owned(), "--addr".to_owned(), addr.to_owned()];
     if as_json {
         argv.push("--json".to_owned());
@@ -351,15 +470,27 @@ async fn run_cli(addr: &str, user_id: Option<&str>, as_json: bool, args: &[&str]
 
     let cli = Cli::parse_from(argv);
     let mut output = Vec::new();
-    execute(cli, &mut output).await.unwrap();
+    execute(cli, &mut output).await?;
 
-    output
+    Ok(output)
 }
 
 async fn test_store() -> SurrealStore {
     SurrealStore::connect("memory", &format!("cli_test_{}", Uuid::now_v7()), "harpe")
         .await
         .unwrap()
+}
+
+fn temp_path(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("harpe-cli-{}-{name}", Uuid::now_v7()))
+}
+
+fn assert_error_contains(error: &(dyn std::error::Error + Send + Sync), expected: &str) {
+    let error = error.to_string().to_ascii_lowercase();
+    assert!(
+        error.contains(expected),
+        "expected error to contain {expected:?}, got {error:?}"
+    );
 }
 
 async fn failed_job(store: &SurrealStore, session_id: &str) -> String {

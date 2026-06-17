@@ -1529,6 +1529,31 @@ mod tests {
     }
 
     #[test]
+    fn parses_page_token_for_list_commands() {
+        let cli = Cli::parse_from([
+            "harpe",
+            "--user-id",
+            "user-1",
+            "game",
+            "list",
+            "--limit",
+            "3",
+            "--page-token",
+            "cursor-1",
+        ]);
+
+        let Command::Game(game) = cli.command else {
+            panic!("expected game command");
+        };
+        let GameCommand::List { page } = game.command else {
+            panic!("expected list command");
+        };
+
+        assert_eq!(page.limit, 3);
+        assert_eq!(page.page_token.as_deref(), Some("cursor-1"));
+    }
+
+    #[test]
     fn normalizes_addresses_for_tonic_endpoints() {
         assert_eq!(normalize_addr("[::1]:50051").unwrap(), "http://[::1]:50051");
         assert_eq!(
