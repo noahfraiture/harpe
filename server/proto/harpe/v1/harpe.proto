@@ -16,6 +16,7 @@ service GameService {
 service SessionService {
   rpc CreateSession(CreateSessionRequest) returns (Session);
   rpc GetSession(GetSessionRequest) returns (Session);
+  rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
   rpc SendMessage(SendMessageRequest) returns (stream MessageDelta);
   rpc PreviewContext(PreviewContextRequest) returns (PreviewContextResponse);
   rpc ListMessages(ListMessagesRequest) returns (ListMessagesResponse);
@@ -147,6 +148,16 @@ message GameSnapshot {
   string exported_at = 9;
 }
 
+message PageRequest {
+  uint32 page_size = 1;
+  string page_token = 2;
+}
+
+message PageInfo {
+  string next_page_token = 1;
+  uint32 returned_count = 2;
+}
+
 message CreateUserRequest {
   string display_name = 1;
 }
@@ -163,10 +174,12 @@ message CreateGameRequest {
 
 message ListGamesRequest {
   uint32 limit = 1;
+  PageRequest page = 10;
 }
 
 message ListGamesResponse {
   repeated Game games = 1;
+  PageInfo page = 10;
 }
 
 message GetGameRequest {
@@ -182,9 +195,26 @@ message GetSessionRequest {
   string session_id = 1;
 }
 
+message ListSessionsRequest {
+  string game_id = 1;
+  uint32 limit = 2;
+  PageRequest page = 10;
+}
+
+message ListSessionsResponse {
+  repeated Session sessions = 1;
+  PageInfo page = 10;
+}
+
 message SendMessageRequest {
   string session_id = 1;
   string content = 2;
+}
+
+enum MessageFinishReason {
+  MESSAGE_FINISH_REASON_UNSPECIFIED = 0;
+  MESSAGE_FINISH_REASON_IN_PROGRESS = 1;
+  MESSAGE_FINISH_REASON_ASSISTANT_COMPLETE = 2;
 }
 
 message MessageDelta {
@@ -192,15 +222,19 @@ message MessageDelta {
   string message_id = 2;
   string delta = 3;
   bool done = 4;
+  uint32 sequence = 5;
+  MessageFinishReason finish_reason = 6;
 }
 
 message ListMessagesRequest {
   string session_id = 1;
   uint32 limit = 2;
+  PageRequest page = 10;
 }
 
 message ListMessagesResponse {
   repeated Message messages = 1;
+  PageInfo page = 10;
 }
 
 message PreviewContextRequest {
@@ -225,10 +259,13 @@ message GetStorySummaryRequest {
 
 message ListCharactersRequest {
   string game_id = 1;
+  uint32 limit = 2;
+  PageRequest page = 10;
 }
 
 message ListCharactersResponse {
   repeated Character characters = 1;
+  PageInfo page = 10;
 }
 
 message GetCharacterRequest {
@@ -238,37 +275,46 @@ message GetCharacterRequest {
 message ListEventsRequest {
   string session_id = 1;
   uint32 limit = 2;
+  PageRequest page = 10;
 }
 
 message ListEventsResponse {
   repeated Event events = 1;
+  PageInfo page = 10;
 }
 
 message ListWorldFactsRequest {
   string game_id = 1;
   uint32 limit = 2;
+  PageRequest page = 10;
 }
 
 message ListWorldFactsResponse {
   repeated WorldFact facts = 1;
+  PageInfo page = 10;
 }
 
 message ListLocationsRequest {
   string game_id = 1;
+  uint32 limit = 2;
+  PageRequest page = 10;
 }
 
 message ListLocationsResponse {
   repeated Location locations = 1;
+  PageInfo page = 10;
 }
 
 message SearchMemoryRequest {
   string session_id = 1;
   string query = 2;
   uint32 limit = 3;
+  PageRequest page = 10;
 }
 
 message SearchMemoryResponse {
   repeated MemoryHit hits = 1;
+  PageInfo page = 10;
 }
 
 message ExportGameRequest {

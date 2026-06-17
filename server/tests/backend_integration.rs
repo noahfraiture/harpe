@@ -33,8 +33,8 @@ use harpe_server::pb::user_service_server::UserServiceServer;
 use harpe_server::pb::{
     CreateGameRequest, CreateSessionRequest, CreateUserRequest, ExportGameRequest, GetGameRequest,
     GetMetricsRequest, GetStorySummaryRequest, HealthCheckRequest, ListGamesRequest,
-    ListMessagesRequest, ListWorldFactsRequest, PreviewContextRequest, SearchMemoryRequest,
-    SendMessageRequest,
+    ListMessagesRequest, ListSessionsRequest, ListWorldFactsRequest, PageRequest,
+    PreviewContextRequest, SearchMemoryRequest, SendMessageRequest,
 };
 use harpe_server::store::HarpeStore;
 use tokio::net::TcpListener;
@@ -982,6 +982,7 @@ async fn grpc_send_message_stream_reports_validation_and_empty_assistant_errors(
             ListMessagesRequest {
                 session_id: session.id.clone(),
                 limit: 10,
+                page: None,
             },
             &user.id,
         ))
@@ -1099,7 +1100,10 @@ async fn grpc_send_message_streams_response_and_updates_memory() {
 
     let mut game_client = GameServiceClient::new(channel.clone());
     let missing_auth = game_client
-        .list_games(ListGamesRequest { limit: 10 })
+        .list_games(ListGamesRequest {
+            limit: 10,
+            page: None,
+        })
         .await
         .unwrap_err();
     assert_eq!(missing_auth.code(), Code::PermissionDenied);
@@ -1159,6 +1163,24 @@ async fn grpc_send_message_streams_response_and_updates_memory() {
         .unwrap()
         .into_inner();
     assert_eq!(fetched_session.id, session.id);
+    let listed_sessions = session_client
+        .list_sessions(with_user(
+            ListSessionsRequest {
+                game_id: game.id.clone(),
+                limit: 0,
+                page: Some(PageRequest {
+                    page_size: 1,
+                    page_token: String::new(),
+                }),
+            },
+            &user.id,
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(listed_sessions.sessions.len(), 1);
+    assert_eq!(listed_sessions.sessions[0].id, session.id);
+    assert_eq!(listed_sessions.page.unwrap().returned_count, 1);
 
     let missing_summary =
         memory_client_get_story_summary_before_update(channel.clone(), &session.id, &user.id).await;
@@ -1197,30 +1219,47 @@ async fn grpc_send_message_streams_response_and_updates_memory() {
 
     let mut response = String::new();
     let mut saw_done = false;
+    let mut sequences = Vec::new();
+    let mut finish_reason = harpe_server::pb::MessageFinishReason::Unspecified as i32;
     while let Some(delta) = stream.next().await {
         let delta = delta.unwrap();
+        sequences.push(delta.sequence);
+        if !delta.done {
+            assert_eq!(
+                delta.finish_reason,
+                harpe_server::pb::MessageFinishReason::InProgress as i32
+            );
+        }
         response.push_str(&delta.delta);
         saw_done = delta.done;
         if saw_done {
+            finish_reason = delta.finish_reason;
             break;
         }
     }
 
     assert_eq!(response, "The gate opens.");
     assert!(saw_done);
+    assert_eq!(sequences, vec![1, 2, 3]);
+    assert_eq!(
+        finish_reason,
+        harpe_server::pb::MessageFinishReason::AssistantComplete as i32
+    );
 
-    let messages = session_client
+    let messages_response = session_client
         .list_messages(with_user(
             ListMessagesRequest {
                 session_id: session.id.clone(),
                 limit: 10,
+                page: None,
             },
             &user.id,
         ))
         .await
         .unwrap()
-        .into_inner()
-        .messages;
+        .into_inner();
+    assert_eq!(messages_response.page.unwrap().returned_count, 2);
+    let messages = messages_response.messages;
     assert_eq!(messages.len(), 2);
 
     assert!(
@@ -1259,6 +1298,7 @@ async fn grpc_send_message_streams_response_and_updates_memory() {
             harpe_server::pb::ListEventsRequest {
                 session_id: summary.session_id.clone(),
                 limit: 10,
+                page: None,
             },
             &user.id,
         ))
@@ -1273,6 +1313,8 @@ async fn grpc_send_message_streams_response_and_updates_memory() {
         .list_characters(with_user(
             harpe_server::pb::ListCharactersRequest {
                 game_id: game.id.clone(),
+                limit: 10,
+                page: None,
             },
             &user.id,
         ))
@@ -1300,6 +1342,7 @@ async fn grpc_send_message_streams_response_and_updates_memory() {
             ListWorldFactsRequest {
                 game_id: game.id.clone(),
                 limit: 10,
+                page: None,
             },
             &user.id,
         ))
@@ -1314,6 +1357,8 @@ async fn grpc_send_message_streams_response_and_updates_memory() {
         .list_locations(with_user(
             harpe_server::pb::ListLocationsRequest {
                 game_id: game.id.clone(),
+                limit: 10,
+                page: None,
             },
             &user.id,
         ))
@@ -1330,6 +1375,7 @@ async fn grpc_send_message_streams_response_and_updates_memory() {
                 session_id: summary.session_id,
                 query: "sea gate harbor".to_owned(),
                 limit: 10,
+                page: None,
             },
             &user.id,
         ))

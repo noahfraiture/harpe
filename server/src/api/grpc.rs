@@ -20,9 +20,9 @@ use crate::pb::{
     ExportGameRequest, GetCharacterRequest, GetGameRequest, GetMetricsRequest, GetSessionRequest,
     GetStorySummaryRequest, GetUserRequest, HealthCheckRequest, ListCharactersRequest,
     ListEventsRequest, ListGamesRequest, ListLocationsRequest, ListMessagesRequest,
-    ListWorldFactsRequest, MessageDelta, PreviewContextRequest, SearchMemoryRequest,
-    SendMessageRequest, game_service_server, health_service_server, memory_service_server,
-    metrics_service_server, session_service_server, user_service_server,
+    ListSessionsRequest, ListWorldFactsRequest, MessageDelta, PreviewContextRequest,
+    SearchMemoryRequest, SendMessageRequest, game_service_server, health_service_server,
+    memory_service_server, metrics_service_server, session_service_server, user_service_server,
 };
 use crate::store::HarpeStore;
 use crate::{HarpeError, Result};
@@ -125,16 +125,21 @@ impl game_service_server::GameService for HarpeGrpc {
         self.metrics.record_grpc_request();
         tracing::debug!(rpc = "GameService.ListGames");
         let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
+        let request = request.into_inner();
         let games = self
             .store
-            .list_games_for_user(&user_id, limit_from_u32(request.into_inner().limit))
+            .list_games_for_user(
+                &user_id,
+                request_limit(request.limit, request.page.as_ref()),
+            )
             .await
             .map_err(status_from_error)?
             .into_iter()
             .map(game_to_pb)
-            .collect();
+            .collect::<Vec<_>>();
+        let page = Some(page_info(games.len()));
 
-        Ok(Response::new(pb::ListGamesResponse { games }))
+        Ok(Response::new(pb::ListGamesResponse { games, page }))
     }
 
     async fn get_game(
@@ -178,6 +183,33 @@ impl session_service_server::SessionService for HarpeGrpc {
             .map_err(status_from_error)?;
 
         Ok(Response::new(session_to_pb(session)))
+    }
+
+    async fn list_sessions(
+        &self,
+        request: Request<ListSessionsRequest>,
+    ) -> std::result::Result<Response<pb::ListSessionsResponse>, Status> {
+        self.metrics.record_grpc_request();
+        tracing::debug!(rpc = "SessionService.ListSessions");
+        let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
+        let request = request.into_inner();
+        require_owned_game(self.store.as_ref(), &request.game_id, &user_id)
+            .await
+            .map_err(status_from_error)?;
+        let sessions = self
+            .store
+            .list_sessions(
+                &request.game_id,
+                request_limit(request.limit, request.page.as_ref()),
+            )
+            .await
+            .map_err(status_from_error)?
+            .into_iter()
+            .map(session_to_pb)
+            .collect::<Vec<_>>();
+        let page = Some(page_info(sessions.len()));
+
+        Ok(Response::new(pb::ListSessionsResponse { sessions, page }))
     }
 
     async fn get_session(
@@ -280,14 +312,18 @@ impl session_service_server::SessionService for HarpeGrpc {
             .map_err(status_from_error)?;
         let messages = self
             .store
-            .list_recent_messages(&request.session_id, limit_from_u32(request.limit))
+            .list_recent_messages(
+                &request.session_id,
+                request_limit(request.limit, request.page.as_ref()),
+            )
             .await
             .map_err(status_from_error)?
             .into_iter()
             .map(message_to_pb)
-            .collect();
+            .collect::<Vec<_>>();
+        let page = Some(page_info(messages.len()));
 
-        Ok(Response::new(pb::ListMessagesResponse { messages }))
+        Ok(Response::new(pb::ListMessagesResponse { messages, page }))
     }
 }
 
@@ -325,16 +361,25 @@ impl memory_service_server::MemoryService for HarpeGrpc {
         require_owned_game(self.store.as_ref(), &request.game_id, &user_id)
             .await
             .map_err(status_from_error)?;
-        let characters = self
+        let mut characters = self
             .store
             .list_characters(&request.game_id)
             .await
-            .map_err(status_from_error)?
+            .map_err(status_from_error)?;
+        truncate_to_limit(
+            &mut characters,
+            request_limit(request.limit, request.page.as_ref()),
+        );
+        let characters = characters
             .into_iter()
             .map(character_to_pb)
-            .collect();
+            .collect::<Vec<_>>();
+        let page = Some(page_info(characters.len()));
 
-        Ok(Response::new(pb::ListCharactersResponse { characters }))
+        Ok(Response::new(pb::ListCharactersResponse {
+            characters,
+            page,
+        }))
     }
 
     async fn get_character(
@@ -369,14 +414,18 @@ impl memory_service_server::MemoryService for HarpeGrpc {
             .map_err(status_from_error)?;
         let events = self
             .store
-            .list_events(&request.session_id, limit_from_u32(request.limit))
+            .list_events(
+                &request.session_id,
+                request_limit(request.limit, request.page.as_ref()),
+            )
             .await
             .map_err(status_from_error)?
             .into_iter()
             .map(event_to_pb)
-            .collect();
+            .collect::<Vec<_>>();
+        let page = Some(page_info(events.len()));
 
-        Ok(Response::new(pb::ListEventsResponse { events }))
+        Ok(Response::new(pb::ListEventsResponse { events, page }))
     }
 
     async fn list_world_facts(
@@ -392,14 +441,18 @@ impl memory_service_server::MemoryService for HarpeGrpc {
             .map_err(status_from_error)?;
         let facts = self
             .store
-            .list_world_facts(&request.game_id, limit_from_u32(request.limit))
+            .list_world_facts(
+                &request.game_id,
+                request_limit(request.limit, request.page.as_ref()),
+            )
             .await
             .map_err(status_from_error)?
             .into_iter()
             .map(world_fact_to_pb)
-            .collect();
+            .collect::<Vec<_>>();
+        let page = Some(page_info(facts.len()));
 
-        Ok(Response::new(pb::ListWorldFactsResponse { facts }))
+        Ok(Response::new(pb::ListWorldFactsResponse { facts, page }))
     }
 
     async fn list_locations(
@@ -413,16 +466,22 @@ impl memory_service_server::MemoryService for HarpeGrpc {
         require_owned_game(self.store.as_ref(), &request.game_id, &user_id)
             .await
             .map_err(status_from_error)?;
-        let locations = self
+        let mut locations = self
             .store
             .list_locations(&request.game_id)
             .await
-            .map_err(status_from_error)?
+            .map_err(status_from_error)?;
+        truncate_to_limit(
+            &mut locations,
+            request_limit(request.limit, request.page.as_ref()),
+        );
+        let locations = locations
             .into_iter()
             .map(location_to_pb)
-            .collect();
+            .collect::<Vec<_>>();
+        let page = Some(page_info(locations.len()));
 
-        Ok(Response::new(pb::ListLocationsResponse { locations }))
+        Ok(Response::new(pb::ListLocationsResponse { locations, page }))
     }
 
     async fn search_memory(
@@ -447,15 +506,16 @@ impl memory_service_server::MemoryService for HarpeGrpc {
                 &request.session_id,
                 &request.query,
                 &embedding,
-                limit_from_u32(request.limit),
+                request_limit(request.limit, request.page.as_ref()),
             )
             .await
             .map_err(status_from_error)?
             .into_iter()
             .map(memory_hit_to_pb)
-            .collect();
+            .collect::<Vec<_>>();
+        let page = Some(page_info(hits.len()));
 
-        Ok(Response::new(pb::SearchMemoryResponse { hits }))
+        Ok(Response::new(pb::SearchMemoryResponse { hits, page }))
     }
 
     async fn export_game(
@@ -549,10 +609,12 @@ async fn run_send_message(
     let assistant_id = new_id();
     let mut response_stream = llm.stream_chat(chat_request).await?;
     let mut assistant_content = String::new();
+    let mut sequence = 0_u32;
 
     while let Some(delta) = response_stream.next().await {
         let delta = delta?;
         assistant_content.push_str(&delta);
+        sequence = sequence.saturating_add(1);
 
         if tx
             .send(Ok(MessageDelta {
@@ -560,6 +622,8 @@ async fn run_send_message(
                 message_id: assistant_id.clone(),
                 delta,
                 done: false,
+                sequence,
+                finish_reason: pb::MessageFinishReason::InProgress as i32,
             }))
             .await
             .is_err()
@@ -597,6 +661,8 @@ async fn run_send_message(
             message_id: assistant_id,
             delta: String::new(),
             done: true,
+            sequence: sequence.saturating_add(1),
+            finish_reason: pb::MessageFinishReason::AssistantComplete as i32,
         }))
         .await;
 
@@ -764,6 +830,27 @@ fn normalize_health_service(service: &str) -> String {
 
 fn limit_from_u32(limit: u32) -> usize {
     usize::try_from(limit).unwrap_or(usize::MAX)
+}
+
+fn request_limit(legacy_limit: u32, page: Option<&pb::PageRequest>) -> usize {
+    let page_size = page
+        .and_then(|page| (page.page_size > 0).then_some(page.page_size))
+        .unwrap_or(legacy_limit);
+
+    limit_from_u32(page_size)
+}
+
+fn truncate_to_limit<T>(items: &mut Vec<T>, limit: usize) {
+    if limit > 0 {
+        items.truncate(limit);
+    }
+}
+
+fn page_info(returned_count: usize) -> pb::PageInfo {
+    pb::PageInfo {
+        next_page_token: String::new(),
+        returned_count: saturating_u32(returned_count),
+    }
 }
 
 fn status_from_error(error: HarpeError) -> Status {
@@ -1040,6 +1127,36 @@ mod tests {
             normalize_health_service(" harpe.v1.MemoryService "),
             "harpe.v1.MemoryService"
         );
+    }
+
+    #[test]
+    fn page_request_overrides_legacy_limit_and_reports_counts() {
+        assert_eq!(request_limit(25, None), 25);
+        assert_eq!(
+            request_limit(
+                25,
+                Some(&pb::PageRequest {
+                    page_size: 3,
+                    page_token: String::new(),
+                }),
+            ),
+            3
+        );
+        assert_eq!(
+            request_limit(
+                25,
+                Some(&pb::PageRequest {
+                    page_size: 0,
+                    page_token: "ignored-for-now".to_owned(),
+                }),
+            ),
+            25
+        );
+
+        let mut items = vec![1, 2, 3, 4];
+        truncate_to_limit(&mut items, 2);
+        assert_eq!(items, vec![1, 2]);
+        assert_eq!(page_info(items.len()).returned_count, 2);
     }
 
     #[test]
