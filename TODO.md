@@ -3,7 +3,6 @@
 ## Backend
 
 - Add provider-specific vector indexes once production embedding dimensions/model choices settle.
-- Add production observability: request latency histograms, metrics export format, and distributed tracing spans.
 - Add incremental/streaming backup export for large campaigns.
 - Add more scripted memory eval scenarios for social scenes, combat, inventory, and long travel arcs.
 

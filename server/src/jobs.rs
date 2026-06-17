@@ -36,6 +36,7 @@ impl JobRunner {
         self
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn process_next_job(&self) -> Result<Option<BackgroundJob>> {
         let Some(job) = self.store.claim_next_job().await? else {
             return Ok(None);
@@ -79,6 +80,7 @@ impl JobRunner {
         })
     }
 
+    #[tracing::instrument(skip_all, fields(job_id = %job.id, job_kind = ?job.kind, attempts = job.attempts))]
     async fn process_claimed_job(&self, job: &BackgroundJob) -> Result<()> {
         if job.status != JobStatus::Running {
             return Err(HarpeError::Validation(format!(
@@ -201,6 +203,7 @@ fn retry_delay_for_attempt(attempts: i32) -> Duration {
     Duration::from_secs(2_u64.pow(exponent)).min(Duration::from_secs(300))
 }
 
+#[tracing::instrument(skip_all, fields(session_id = %session.id, game_id = %game_id))]
 pub async fn update_memory_after_turn(
     session: &Session,
     game_id: &str,
@@ -255,6 +258,17 @@ pub async fn update_memory_after_turn(
     .await
 }
 
+#[tracing::instrument(
+    skip_all,
+    fields(
+        session_id = %session.id,
+        game_id = %game_id,
+        event_count = extraction.events.len(),
+        character_count = extraction.character_updates.len(),
+        world_fact_count = extraction.world_facts.len(),
+        location_count = extraction.locations.len(),
+    )
+)]
 async fn persist_extraction(
     session: &Session,
     game_id: &str,

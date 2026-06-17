@@ -17,14 +17,14 @@ use crate::llm::{ChatRequest, LlmClient};
 use crate::observability::{AppMetrics, MetricsSnapshot as AppMetricsSnapshot, SharedMetrics};
 use crate::pb::{
     self, ContextMessage, CreateGameRequest, CreateSessionRequest, CreateUserRequest,
-    ExportGameRequest, GetCharacterRequest, GetGameRequest, GetMetricsRequest, GetSessionRequest,
-    GetStorySummaryRequest, GetUserRequest, HealthCheckRequest, ListBackgroundJobsRequest,
-    ListCharactersRequest, ListEventsRequest, ListGamesRequest, ListLocationsRequest,
-    ListMemoryChunksRequest, ListMessagesRequest, ListSessionsRequest, ListWorldFactsRequest,
-    MessageDelta, PreviewContextRequest, PurgeBackgroundJobRequest, RetryBackgroundJobRequest,
-    SearchMemoryRequest, SendMessageRequest, admin_service_server, game_service_server,
-    health_service_server, memory_service_server, metrics_service_server, session_service_server,
-    user_service_server,
+    ExportGameRequest, ExportMetricsRequest, GetCharacterRequest, GetGameRequest,
+    GetMetricsRequest, GetSessionRequest, GetStorySummaryRequest, GetUserRequest,
+    HealthCheckRequest, ListBackgroundJobsRequest, ListCharactersRequest, ListEventsRequest,
+    ListGamesRequest, ListLocationsRequest, ListMemoryChunksRequest, ListMessagesRequest,
+    ListSessionsRequest, ListWorldFactsRequest, MessageDelta, PreviewContextRequest,
+    PurgeBackgroundJobRequest, RetryBackgroundJobRequest, SearchMemoryRequest, SendMessageRequest,
+    admin_service_server, game_service_server, health_service_server, memory_service_server,
+    metrics_service_server, session_service_server, user_service_server,
 };
 use crate::store::HarpeStore;
 use crate::{HarpeError, Result};
@@ -65,6 +65,7 @@ impl user_service_server::UserService for HarpeGrpc {
         request: Request<CreateUserRequest>,
     ) -> std::result::Result<Response<pb::User>, Status> {
         self.metrics.record_grpc_request();
+        let _latency = self.metrics.track_grpc_latency();
         tracing::debug!(rpc = "UserService.CreateUser");
         let request = request.into_inner();
         let user = self
@@ -83,6 +84,7 @@ impl user_service_server::UserService for HarpeGrpc {
         request: Request<GetUserRequest>,
     ) -> std::result::Result<Response<pb::User>, Status> {
         self.metrics.record_grpc_request();
+        let _latency = self.metrics.track_grpc_latency();
         tracing::debug!(rpc = "UserService.GetUser");
         let user = self
             .store
@@ -101,6 +103,7 @@ impl game_service_server::GameService for HarpeGrpc {
         request: Request<CreateGameRequest>,
     ) -> std::result::Result<Response<pb::Game>, Status> {
         self.metrics.record_grpc_request();
+        let _latency = self.metrics.track_grpc_latency();
         tracing::debug!(rpc = "GameService.CreateGame");
         let metadata_user_id = optional_user_id(request.metadata()).map_err(status_from_error)?;
         let request = request.into_inner();
@@ -125,6 +128,7 @@ impl game_service_server::GameService for HarpeGrpc {
         request: Request<ListGamesRequest>,
     ) -> std::result::Result<Response<pb::ListGamesResponse>, Status> {
         self.metrics.record_grpc_request();
+        let _latency = self.metrics.track_grpc_latency();
         tracing::debug!(rpc = "GameService.ListGames");
         let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let request = request.into_inner();
@@ -149,6 +153,7 @@ impl game_service_server::GameService for HarpeGrpc {
         request: Request<GetGameRequest>,
     ) -> std::result::Result<Response<pb::Game>, Status> {
         self.metrics.record_grpc_request();
+        let _latency = self.metrics.track_grpc_latency();
         tracing::debug!(rpc = "GameService.GetGame");
         let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let game_id = request.into_inner().game_id;
@@ -169,6 +174,7 @@ impl session_service_server::SessionService for HarpeGrpc {
         request: Request<CreateSessionRequest>,
     ) -> std::result::Result<Response<pb::Session>, Status> {
         self.metrics.record_grpc_request();
+        let _latency = self.metrics.track_grpc_latency();
         tracing::debug!(rpc = "SessionService.CreateSession");
         let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let request = request.into_inner();
@@ -192,6 +198,7 @@ impl session_service_server::SessionService for HarpeGrpc {
         request: Request<ListSessionsRequest>,
     ) -> std::result::Result<Response<pb::ListSessionsResponse>, Status> {
         self.metrics.record_grpc_request();
+        let _latency = self.metrics.track_grpc_latency();
         tracing::debug!(rpc = "SessionService.ListSessions");
         let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let request = request.into_inner();
@@ -219,6 +226,7 @@ impl session_service_server::SessionService for HarpeGrpc {
         request: Request<GetSessionRequest>,
     ) -> std::result::Result<Response<pb::Session>, Status> {
         self.metrics.record_grpc_request();
+        let _latency = self.metrics.track_grpc_latency();
         tracing::debug!(rpc = "SessionService.GetSession");
         let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let session_id = request.into_inner().session_id;
@@ -234,6 +242,7 @@ impl session_service_server::SessionService for HarpeGrpc {
         request: Request<SendMessageRequest>,
     ) -> std::result::Result<Response<Self::SendMessageStream>, Status> {
         self.metrics.record_grpc_request();
+        let _latency = self.metrics.track_grpc_latency();
         tracing::debug!(rpc = "SessionService.SendMessage");
         let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let request = request.into_inner();
@@ -268,6 +277,7 @@ impl session_service_server::SessionService for HarpeGrpc {
         request: Request<PreviewContextRequest>,
     ) -> std::result::Result<Response<pb::PreviewContextResponse>, Status> {
         self.metrics.record_grpc_request();
+        let _latency = self.metrics.track_grpc_latency();
         tracing::debug!(rpc = "SessionService.PreviewContext");
         let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let request = request.into_inner();
@@ -306,6 +316,7 @@ impl session_service_server::SessionService for HarpeGrpc {
         request: Request<ListMessagesRequest>,
     ) -> std::result::Result<Response<pb::ListMessagesResponse>, Status> {
         self.metrics.record_grpc_request();
+        let _latency = self.metrics.track_grpc_latency();
         tracing::debug!(rpc = "SessionService.ListMessages");
         let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let request = request.into_inner();
@@ -336,6 +347,7 @@ impl memory_service_server::MemoryService for HarpeGrpc {
         request: Request<GetStorySummaryRequest>,
     ) -> std::result::Result<Response<pb::StorySummary>, Status> {
         self.metrics.record_grpc_request();
+        let _latency = self.metrics.track_grpc_latency();
         tracing::debug!(rpc = "MemoryService.GetStorySummary");
         let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let request = request.into_inner();
@@ -357,6 +369,7 @@ impl memory_service_server::MemoryService for HarpeGrpc {
         request: Request<ListCharactersRequest>,
     ) -> std::result::Result<Response<pb::ListCharactersResponse>, Status> {
         self.metrics.record_grpc_request();
+        let _latency = self.metrics.track_grpc_latency();
         tracing::debug!(rpc = "MemoryService.ListCharacters");
         let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let request = request.into_inner();
@@ -389,6 +402,7 @@ impl memory_service_server::MemoryService for HarpeGrpc {
         request: Request<GetCharacterRequest>,
     ) -> std::result::Result<Response<pb::Character>, Status> {
         self.metrics.record_grpc_request();
+        let _latency = self.metrics.track_grpc_latency();
         tracing::debug!(rpc = "MemoryService.GetCharacter");
         let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let character = self
@@ -408,6 +422,7 @@ impl memory_service_server::MemoryService for HarpeGrpc {
         request: Request<ListEventsRequest>,
     ) -> std::result::Result<Response<pb::ListEventsResponse>, Status> {
         self.metrics.record_grpc_request();
+        let _latency = self.metrics.track_grpc_latency();
         tracing::debug!(rpc = "MemoryService.ListEvents");
         let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let request = request.into_inner();
@@ -435,6 +450,7 @@ impl memory_service_server::MemoryService for HarpeGrpc {
         request: Request<ListWorldFactsRequest>,
     ) -> std::result::Result<Response<pb::ListWorldFactsResponse>, Status> {
         self.metrics.record_grpc_request();
+        let _latency = self.metrics.track_grpc_latency();
         tracing::debug!(rpc = "MemoryService.ListWorldFacts");
         let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let request = request.into_inner();
@@ -462,6 +478,7 @@ impl memory_service_server::MemoryService for HarpeGrpc {
         request: Request<ListLocationsRequest>,
     ) -> std::result::Result<Response<pb::ListLocationsResponse>, Status> {
         self.metrics.record_grpc_request();
+        let _latency = self.metrics.track_grpc_latency();
         tracing::debug!(rpc = "MemoryService.ListLocations");
         let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let request = request.into_inner();
@@ -491,6 +508,7 @@ impl memory_service_server::MemoryService for HarpeGrpc {
         request: Request<SearchMemoryRequest>,
     ) -> std::result::Result<Response<pb::SearchMemoryResponse>, Status> {
         self.metrics.record_grpc_request();
+        let _latency = self.metrics.track_grpc_latency();
         tracing::debug!(rpc = "MemoryService.SearchMemory");
         let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let request = request.into_inner();
@@ -525,6 +543,7 @@ impl memory_service_server::MemoryService for HarpeGrpc {
         request: Request<ExportGameRequest>,
     ) -> std::result::Result<Response<pb::GameSnapshot>, Status> {
         self.metrics.record_grpc_request();
+        let _latency = self.metrics.track_grpc_latency();
         tracing::debug!(rpc = "MemoryService.ExportGame");
         let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let request = request.into_inner();
@@ -548,6 +567,7 @@ impl health_service_server::HealthService for HarpeGrpc {
         request: Request<HealthCheckRequest>,
     ) -> std::result::Result<Response<pb::HealthCheckResponse>, Status> {
         self.metrics.record_grpc_request();
+        let _latency = self.metrics.track_grpc_latency();
         self.metrics.record_health_check();
         tracing::debug!(rpc = "HealthService.Check");
         let service = normalize_health_service(&request.into_inner().service);
@@ -564,9 +584,34 @@ impl metrics_service_server::MetricsService for HarpeGrpc {
         _request: Request<GetMetricsRequest>,
     ) -> std::result::Result<Response<pb::MetricsSnapshot>, Status> {
         self.metrics.record_grpc_request();
+        let _latency = self.metrics.track_grpc_latency();
         tracing::debug!(rpc = "MetricsService.GetMetrics");
 
         Ok(Response::new(metrics_to_pb(self.metrics.snapshot())))
+    }
+
+    async fn export_metrics(
+        &self,
+        request: Request<ExportMetricsRequest>,
+    ) -> std::result::Result<Response<pb::ExportMetricsResponse>, Status> {
+        self.metrics.record_grpc_request();
+        let _latency = self.metrics.track_grpc_latency();
+        tracing::debug!(rpc = "MetricsService.ExportMetrics");
+        let request = request.into_inner();
+        let format = pb::MetricsExportFormat::try_from(request.format).map_err(|_| {
+            status_from_error(HarpeError::Validation(format!(
+                "unknown metrics export format {}",
+                request.format
+            )))
+        })?;
+        match format {
+            pb::MetricsExportFormat::Unspecified | pb::MetricsExportFormat::PrometheusText => {
+                Ok(Response::new(pb::ExportMetricsResponse {
+                    content_type: "text/plain; version=0.0.4; charset=utf-8".to_owned(),
+                    body: self.metrics.export_prometheus(),
+                }))
+            }
+        }
     }
 }
 
@@ -577,6 +622,7 @@ impl admin_service_server::AdminService for HarpeGrpc {
         request: Request<ListBackgroundJobsRequest>,
     ) -> std::result::Result<Response<pb::ListBackgroundJobsResponse>, Status> {
         self.metrics.record_grpc_request();
+        let _latency = self.metrics.track_grpc_latency();
         tracing::debug!(rpc = "AdminService.ListBackgroundJobs");
         let request = request.into_inner();
         let status = admin_job_status_filter(request.status).map_err(status_from_error)?;
@@ -598,6 +644,7 @@ impl admin_service_server::AdminService for HarpeGrpc {
         request: Request<RetryBackgroundJobRequest>,
     ) -> std::result::Result<Response<pb::BackgroundJobDebug>, Status> {
         self.metrics.record_grpc_request();
+        let _latency = self.metrics.track_grpc_latency();
         tracing::debug!(rpc = "AdminService.RetryBackgroundJob");
         let request = request.into_inner();
         validate_job_id(&request.job_id).map_err(status_from_error)?;
@@ -616,6 +663,7 @@ impl admin_service_server::AdminService for HarpeGrpc {
         request: Request<PurgeBackgroundJobRequest>,
     ) -> std::result::Result<Response<pb::BackgroundJobDebug>, Status> {
         self.metrics.record_grpc_request();
+        let _latency = self.metrics.track_grpc_latency();
         tracing::debug!(rpc = "AdminService.PurgeBackgroundJob");
         let request = request.into_inner();
         validate_job_id(&request.job_id).map_err(status_from_error)?;
@@ -633,6 +681,7 @@ impl admin_service_server::AdminService for HarpeGrpc {
         request: Request<ListMemoryChunksRequest>,
     ) -> std::result::Result<Response<pb::ListMemoryChunksResponse>, Status> {
         self.metrics.record_grpc_request();
+        let _latency = self.metrics.track_grpc_latency();
         tracing::debug!(rpc = "AdminService.ListMemoryChunks");
         let request = request.into_inner();
         if request.session_id.trim().is_empty() {
@@ -658,6 +707,7 @@ impl admin_service_server::AdminService for HarpeGrpc {
     }
 }
 
+#[tracing::instrument(skip_all, fields(session_id = %request.session_id, user_id = %user_id))]
 async fn run_send_message(
     request: SendMessageRequest,
     user_id: String,
@@ -759,6 +809,7 @@ async fn run_send_message(
     Ok(())
 }
 
+#[tracing::instrument(skip_all, fields(session_id = %session.id, game_id = %game.id))]
 async fn build_context_for_turn(
     session: &Session,
     game: &Game,
@@ -1115,6 +1166,16 @@ fn metrics_to_pb(snapshot: AppMetricsSnapshot) -> pb::MetricsSnapshot {
         jobs_retried: snapshot.jobs_retried,
         jobs_failed: snapshot.jobs_failed,
         health_checks: snapshot.health_checks,
+        grpc_latency_count: snapshot.grpc_latency_count,
+        grpc_latency_sum_ms: snapshot.grpc_latency_sum_ms,
+        grpc_latency_buckets: snapshot
+            .grpc_latency_buckets
+            .into_iter()
+            .map(|bucket| pb::HistogramBucket {
+                le: bucket.le_label(),
+                count: bucket.count,
+            })
+            .collect(),
         collected_at: snapshot.collected_at.to_rfc3339(),
     }
 }
@@ -1359,6 +1420,7 @@ mod tests {
 
         assert_eq!(response.grpc_requests, 1);
         assert_eq!(response.jobs_retried, 1);
+        assert!(!response.grpc_latency_buckets.is_empty());
         assert!(!response.collected_at.is_empty());
     }
 }

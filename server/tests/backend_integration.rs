@@ -33,11 +33,12 @@ use harpe_server::pb::session_service_server::SessionServiceServer;
 use harpe_server::pb::user_service_client::UserServiceClient;
 use harpe_server::pb::user_service_server::UserServiceServer;
 use harpe_server::pb::{
-    CreateGameRequest, CreateSessionRequest, CreateUserRequest, ExportGameRequest, GetGameRequest,
-    GetMetricsRequest, GetStorySummaryRequest, HealthCheckRequest, ListBackgroundJobsRequest,
-    ListGamesRequest, ListMemoryChunksRequest, ListMessagesRequest, ListSessionsRequest,
-    ListWorldFactsRequest, PageRequest, PreviewContextRequest, PurgeBackgroundJobRequest,
-    RetryBackgroundJobRequest, SearchMemoryRequest, SendMessageRequest,
+    CreateGameRequest, CreateSessionRequest, CreateUserRequest, ExportGameRequest,
+    ExportMetricsRequest, GetGameRequest, GetMetricsRequest, GetStorySummaryRequest,
+    HealthCheckRequest, ListBackgroundJobsRequest, ListGamesRequest, ListMemoryChunksRequest,
+    ListMessagesRequest, ListSessionsRequest, ListWorldFactsRequest, PageRequest,
+    PreviewContextRequest, PurgeBackgroundJobRequest, RetryBackgroundJobRequest,
+    SearchMemoryRequest, SendMessageRequest,
 };
 use harpe_server::store::HarpeStore;
 use tokio::net::TcpListener;
@@ -1580,7 +1581,7 @@ async fn grpc_send_message_streams_response_and_updates_memory() {
     )
     .await;
 
-    let metrics_snapshot = MetricsServiceClient::new(channel)
+    let metrics_snapshot = MetricsServiceClient::new(channel.clone())
         .get_metrics(GetMetricsRequest {})
         .await
         .unwrap()
@@ -1592,6 +1593,27 @@ async fn grpc_send_message_streams_response_and_updates_memory() {
     assert_eq!(metrics_snapshot.jobs_succeeded, 1);
     assert_eq!(metrics_snapshot.jobs_retried, 0);
     assert_eq!(metrics_snapshot.jobs_failed, 0);
+    assert!(metrics_snapshot.grpc_latency_count > 0);
+    assert!(!metrics_snapshot.grpc_latency_buckets.is_empty());
+    assert_eq!(
+        metrics_snapshot.grpc_latency_buckets.last().unwrap().count,
+        metrics_snapshot.grpc_latency_count
+    );
+
+    let metrics_export = MetricsServiceClient::new(channel)
+        .export_metrics(ExportMetricsRequest {
+            format: harpe_server::pb::MetricsExportFormat::PrometheusText as i32,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(metrics_export.content_type.contains("text/plain"));
+    assert!(metrics_export.body.contains("harpe_grpc_requests_total"));
+    assert!(
+        metrics_export
+            .body
+            .contains("harpe_grpc_request_duration_milliseconds_bucket")
+    );
 
     server.abort();
 }
