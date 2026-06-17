@@ -1128,10 +1128,10 @@ async fn grpc_send_message_streams_response_and_updates_memory() {
                     status: "alert".to_owned(),
                 }],
                 world_facts: vec![ExtractedWorldFact {
-                    subject: "sea gate".to_owned(),
-                    predicate: "guards".to_owned(),
-                    object: "Iron Coast harbor".to_owned(),
-                    content: "The sea gate guards Iron Coast harbor.".to_owned(),
+                    subject: "Mira".to_owned(),
+                    predicate: "watches".to_owned(),
+                    object: "sea gate".to_owned(),
+                    content: "Mira watches the sea gate at Iron Coast harbor.".to_owned(),
                     confidence: 0.9,
                 }],
                 locations: vec![ExtractedLocation {
@@ -1476,7 +1476,10 @@ async fn grpc_send_message_streams_response_and_updates_memory() {
         .into_inner()
         .facts;
     assert_eq!(facts.len(), 1);
-    assert_eq!(facts[0].content, "The sea gate guards Iron Coast harbor.");
+    assert_eq!(
+        facts[0].content,
+        "Mira watches the sea gate at Iron Coast harbor."
+    );
 
     let locations = memory_client
         .list_locations(with_user(
@@ -1493,6 +1496,30 @@ async fn grpc_send_message_streams_response_and_updates_memory() {
         .locations;
     assert_eq!(locations.len(), 1);
     assert_eq!(locations[0].name, "Iron Coast harbor");
+    assert_relation_targets(
+        &store,
+        GraphRelationKind::EventInvolvesCharacter,
+        &events[0].id,
+        "character",
+        &characters[0].id,
+    )
+    .await;
+    assert_relation_targets(
+        &store,
+        GraphRelationKind::EventHappenedAtLocation,
+        &events[0].id,
+        "location",
+        &locations[0].id,
+    )
+    .await;
+    assert_relation_targets(
+        &store,
+        GraphRelationKind::CharacterKnowsWorldFact,
+        &characters[0].id,
+        "world_fact",
+        &facts[0].id,
+    )
+    .await;
 
     let hits = memory_client
         .search_memory(with_user(
@@ -1539,6 +1566,19 @@ async fn grpc_send_message_streams_response_and_updates_memory() {
             .iter()
             .any(|chunk| chunk.kind == "world_fact")
     );
+    let world_fact_chunk = admin_chunks
+        .chunks
+        .iter()
+        .find(|chunk| chunk.kind == "world_fact")
+        .unwrap();
+    assert_relation_targets(
+        &store,
+        GraphRelationKind::MemorySupportsWorldFact,
+        &world_fact_chunk.id,
+        "world_fact",
+        &facts[0].id,
+    )
+    .await;
 
     let metrics_snapshot = MetricsServiceClient::new(channel)
         .get_metrics(GetMetricsRequest {})

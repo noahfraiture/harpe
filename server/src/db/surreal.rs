@@ -1000,6 +1000,19 @@ impl HarpeStore for SurrealStore {
             .collect())
     }
 
+    async fn upsert_graph_edge(
+        &self,
+        relation: GraphRelationKind,
+        in_record_id: &str,
+        out_record_id: &str,
+    ) -> Result<()> {
+        validate_present("graph edge source id", in_record_id)?;
+        validate_present("graph edge target id", out_record_id)?;
+
+        self.upsert_graph_relation(relation, in_record_id, out_record_id)
+            .await
+    }
+
     async fn save_memory_chunk(&self, input: NewMemoryChunk) -> Result<MemoryHit> {
         validate_present("session id", &input.session_id)?;
         validate_present("memory content", &input.content)?;

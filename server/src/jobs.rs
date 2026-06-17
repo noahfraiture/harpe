@@ -6,9 +6,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::domain::{
-    BackgroundJob, JobKind, JobStatus, MemoryExtraction, NewBackgroundJob, NewEvent,
-    NewMemoryChunk, Session, UpsertCharacter, UpsertLocation, UpsertStorySummary, UpsertWorldFact,
-    WorldFact,
+    BackgroundJob, Character, Event, GraphRelationKind, JobKind, JobStatus, Location,
+    MemoryExtraction, MemoryHit, NewBackgroundJob, NewEvent, NewMemoryChunk, Session,
+    UpsertCharacter, UpsertLocation, UpsertStorySummary, UpsertWorldFact, WorldFact,
 };
 use crate::llm::{ExtractMemoryRequest, LlmClient, SummarizeRequest};
 use crate::observability::{AppMetrics, SharedMetrics};
@@ -228,7 +228,7 @@ pub async fn update_memory_after_turn(
         .await?;
 
     let embedding = llm.embed(assistant_content).await?;
-    store
+    let turn_memory = store
         .save_memory_chunk(NewMemoryChunk {
             session_id: session.id.clone(),
             kind: "turn".to_owned(),
@@ -244,16 +244,31 @@ pub async fn update_memory_after_turn(
             messages: recent_messages,
         })
         .await?;
-    persist_extraction(session, game_id, extraction, store, llm).await
+    persist_extraction(
+        session,
+        game_id,
+        extraction,
+        Some(turn_memory.chunk.id),
+        store,
+        llm,
+    )
+    .await
 }
 
 async fn persist_extraction(
     session: &Session,
     game_id: &str,
     extraction: MemoryExtraction,
+    turn_memory_id: Option<String>,
     store: &dyn HarpeStore,
     llm: &dyn LlmClient,
 ) -> Result<()> {
+    let mut saved_events = Vec::new();
+    let mut saved_characters = Vec::new();
+    let mut saved_facts = Vec::new();
+    let mut saved_locations = Vec::new();
+    let mut fact_memory_edges = Vec::<(String, String)>::new();
+
     for event in extraction.events {
         if event.summary.trim().is_empty() {
             continue;
@@ -266,7 +281,8 @@ async fn persist_extraction(
                 importance: event.importance,
             })
             .await?;
-        save_embedded_memory(session, "event", event.summary.as_str(), store, llm).await?;
+        let _ = save_embedded_memory(session, "event", event.summary.as_str(), store, llm).await?;
+        saved_events.push(event);
     }
 
     let existing_characters = store.list_characters(game_id).await?;
@@ -288,7 +304,7 @@ async fn persist_extraction(
                 status: character.status,
             })
             .await?;
-        save_embedded_memory(
+        let _ = save_embedded_memory(
             session,
             "character",
             &format!(
@@ -299,6 +315,7 @@ async fn persist_extraction(
             llm,
         )
         .await?;
+        saved_characters.push(character);
     }
 
     let existing_facts = store.list_world_facts(game_id, 100).await?;
@@ -325,7 +342,15 @@ async fn persist_extraction(
                 confidence: fact.confidence,
             })
             .await?;
-        save_embedded_memory(session, "world_fact", &fact.content, store, llm).await?;
+        if let Some(turn_memory_id) = turn_memory_id.as_deref() {
+            fact_memory_edges.push((turn_memory_id.to_owned(), fact.id.clone()));
+        }
+        if let Some(memory) =
+            save_embedded_memory(session, "world_fact", &fact.content, store, llm).await?
+        {
+            fact_memory_edges.push((memory.chunk.id, fact.id.clone()));
+        }
+        saved_facts.push(fact);
     }
 
     let existing_locations = store.list_locations(game_id).await?;
@@ -346,7 +371,7 @@ async fn persist_extraction(
                 description: location.description,
             })
             .await?;
-        save_embedded_memory(
+        let _ = save_embedded_memory(
             session,
             "location",
             &format!("{} | {}", location.name, location.description),
@@ -354,7 +379,18 @@ async fn persist_extraction(
             llm,
         )
         .await?;
+        saved_locations.push(location);
     }
+
+    link_extraction_graph(
+        store,
+        &saved_events,
+        &saved_characters,
+        &saved_facts,
+        &saved_locations,
+        &fact_memory_edges,
+    )
+    .await?;
 
     Ok(())
 }
@@ -365,14 +401,14 @@ async fn save_embedded_memory(
     content: &str,
     store: &dyn HarpeStore,
     llm: &dyn LlmClient,
-) -> Result<()> {
+) -> Result<Option<MemoryHit>> {
     let content = content.trim();
     if content.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
 
     let embedding = llm.embed(content).await?;
-    store
+    let hit = store
         .save_memory_chunk(NewMemoryChunk {
             session_id: session.id.clone(),
             kind: kind.to_owned(),
@@ -381,11 +417,72 @@ async fn save_embedded_memory(
         })
         .await?;
 
+    Ok(Some(hit))
+}
+
+async fn link_extraction_graph(
+    store: &dyn HarpeStore,
+    events: &[Event],
+    characters: &[Character],
+    facts: &[WorldFact],
+    locations: &[Location],
+    fact_memory_edges: &[(String, String)],
+) -> Result<()> {
+    for event in events {
+        for character in characters {
+            store
+                .upsert_graph_edge(
+                    GraphRelationKind::EventInvolvesCharacter,
+                    &event.id,
+                    &character.id,
+                )
+                .await?;
+        }
+        for location in locations {
+            store
+                .upsert_graph_edge(
+                    GraphRelationKind::EventHappenedAtLocation,
+                    &event.id,
+                    &location.id,
+                )
+                .await?;
+        }
+    }
+
+    for character in characters {
+        for fact in facts
+            .iter()
+            .filter(|fact| character_matches_fact(character, fact))
+        {
+            store
+                .upsert_graph_edge(
+                    GraphRelationKind::CharacterKnowsWorldFact,
+                    &character.id,
+                    &fact.id,
+                )
+                .await?;
+        }
+    }
+
+    for (memory_id, fact_id) in fact_memory_edges {
+        store
+            .upsert_graph_edge(
+                GraphRelationKind::MemorySupportsWorldFact,
+                memory_id,
+                fact_id,
+            )
+            .await?;
+    }
+
     Ok(())
 }
 
 fn same_name(left: &str, right: &str) -> bool {
     left.trim().eq_ignore_ascii_case(right.trim())
+}
+
+fn character_matches_fact(character: &Character, fact: &WorldFact) -> bool {
+    same_name(&character.name, &fact.subject) || same_name(&character.name, &fact.object)
 }
 
 fn same_fact(fact: &WorldFact, subject: &str, predicate: &str, object: &str) -> bool {
@@ -444,6 +541,29 @@ mod tests {
 
         assert!(same_fact(&fact, " silver key ", "opens", "lower vault"));
         assert!(!same_fact(&fact, "bronze key", "opens", "lower vault"));
+
+        let character = Character {
+            id: "character-1".to_owned(),
+            game_id: "game-1".to_owned(),
+            name: "Mira".to_owned(),
+            description: "Gate scout".to_owned(),
+            status: "alert".to_owned(),
+            updated_at: chrono::Utc::now(),
+        };
+        let known_fact = WorldFact {
+            id: "fact-2".to_owned(),
+            subject: " mira ".to_owned(),
+            ..fact.clone()
+        };
+        let unrelated_fact = WorldFact {
+            id: "fact-3".to_owned(),
+            subject: "Sea gate".to_owned(),
+            object: "Harbor".to_owned(),
+            ..fact
+        };
+
+        assert!(character_matches_fact(&character, &known_fact));
+        assert!(!character_matches_fact(&character, &unrelated_fact));
     }
 
     #[test]

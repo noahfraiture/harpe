@@ -95,6 +95,12 @@ pub trait HarpeStore: Send + Sync {
         relation: GraphRelationKind,
         in_record_id: &str,
     ) -> Result<Vec<GraphEdge>>;
+    async fn upsert_graph_edge(
+        &self,
+        relation: GraphRelationKind,
+        in_record_id: &str,
+        out_record_id: &str,
+    ) -> Result<()>;
 
     async fn save_memory_chunk(&self, input: NewMemoryChunk) -> Result<MemoryHit>;
     async fn list_memory_chunks(&self, session_id: &str, limit: usize) -> Result<Vec<MemoryChunk>>;
