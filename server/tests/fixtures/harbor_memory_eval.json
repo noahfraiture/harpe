@@ -1,0 +1,113 @@
+{
+  "game_title": "Iron Coast",
+  "system_prompt": "Run a grounded coastal fantasy mystery.",
+  "turns": [
+    {
+      "user": "I ask Mira what she knows about the rusted sea gate.",
+      "assistant": "Mira says the rusted sea gate guards Iron Coast harbor. She is nervous because the fog bell rang without a hand touching it.",
+      "summary": "The party reached Iron Coast harbor. Mira explained that the rusted sea gate guards the harbor, and the fog bell rang on its own.",
+      "extraction": {
+        "events": [
+          {
+            "summary": "Mira warned that the fog bell rang by itself at Iron Coast harbor.",
+            "importance": 4
+          }
+        ],
+        "character_updates": [
+          {
+            "name": "Mira",
+            "description": "A harbor scout watching the rusted sea gate.",
+            "status": "nervous"
+          }
+        ],
+        "world_facts": [
+          {
+            "subject": "rusted sea gate",
+            "predicate": "guards",
+            "object": "Iron Coast harbor",
+            "content": "The rusted sea gate guards Iron Coast harbor.",
+            "confidence": 0.9
+          }
+        ],
+        "locations": [
+          {
+            "name": "Iron Coast harbor",
+            "description": "A storm-battered harbor sealed by a rusted sea gate."
+          }
+        ]
+      }
+    },
+    {
+      "user": "I use the silver key on the sea gate and ask Mira to watch the bell.",
+      "assistant": "The silver key opens the rusted sea gate. Mira steadies herself and becomes alert as the fog bell rings again from inside the harbor tower.",
+      "summary": "The party reached Iron Coast harbor. Mira explained that the rusted sea gate guards the harbor, and the fog bell rang on its own. The silver key opened the sea gate, and Mira became alert when the fog bell rang again from inside the harbor tower.",
+      "extraction": {
+        "events": [
+          {
+            "summary": "The silver key opened the rusted sea gate.",
+            "importance": 5
+          },
+          {
+            "summary": "The fog bell rang again from inside the harbor tower.",
+            "importance": 4
+          }
+        ],
+        "character_updates": [
+          {
+            "name": "Mira",
+            "description": "A harbor scout watching the rusted sea gate and fog bell.",
+            "status": "alert"
+          }
+        ],
+        "world_facts": [
+          {
+            "subject": "silver key",
+            "predicate": "opens",
+            "object": "rusted sea gate",
+            "content": "The silver key opens the rusted sea gate.",
+            "confidence": 1.0
+          },
+          {
+            "subject": "fog bell",
+            "predicate": "rings from",
+            "object": "harbor tower",
+            "content": "The fog bell can ring from inside the harbor tower.",
+            "confidence": 0.8
+          }
+        ],
+        "locations": [
+          {
+            "name": "Harbor tower",
+            "description": "A tower inside Iron Coast harbor where the fog bell rang."
+          }
+        ]
+      }
+    }
+  ],
+  "expected": {
+    "summary_contains": [
+      "silver key opened the sea gate",
+      "Mira became alert",
+      "fog bell rang again"
+    ],
+    "character_status": {
+      "Mira": "alert"
+    },
+    "event_summaries": [
+      "Mira warned that the fog bell rang by itself at Iron Coast harbor.",
+      "The silver key opened the rusted sea gate.",
+      "The fog bell rang again from inside the harbor tower."
+    ],
+    "world_fact_contents": [
+      "The rusted sea gate guards Iron Coast harbor.",
+      "The silver key opens the rusted sea gate.",
+      "The fog bell can ring from inside the harbor tower."
+    ],
+    "locations": [
+      "Iron Coast harbor",
+      "Harbor tower"
+    ],
+    "search_query": "silver key sea gate",
+    "search_result_contains": "silver key opens"
+  }
+}
