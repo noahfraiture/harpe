@@ -1,8 +1,11 @@
 FROM rust:1-bookworm AS builder
 
 WORKDIR /app
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
 COPY . .
-RUN cargo build --release -p harpe-server
+RUN cargo build --release -p harpe-server --locked
 
 FROM debian:bookworm-slim
 
