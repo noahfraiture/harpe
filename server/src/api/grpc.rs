@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use futures_util::StreamExt;
+use serde::Serialize;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, metadata::MetadataMap};
@@ -342,6 +343,8 @@ impl session_service_server::SessionService for HarpeGrpc {
 
 #[tonic::async_trait]
 impl memory_service_server::MemoryService for HarpeGrpc {
+    type ExportGameStreamStream = ReceiverStream<std::result::Result<pb::GameBackupChunk, Status>>;
+
     async fn get_story_summary(
         &self,
         request: Request<GetStorySummaryRequest>,
@@ -557,6 +560,32 @@ impl memory_service_server::MemoryService for HarpeGrpc {
             .map_err(status_from_error)?;
 
         Ok(Response::new(snapshot_to_pb(snapshot)))
+    }
+
+    async fn export_game_stream(
+        &self,
+        request: Request<ExportGameRequest>,
+    ) -> std::result::Result<Response<Self::ExportGameStreamStream>, Status> {
+        self.metrics.record_grpc_request();
+        let _latency = self.metrics.track_grpc_latency();
+        tracing::debug!(rpc = "MemoryService.ExportGameStream");
+        let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
+        let request = request.into_inner();
+        let game = require_owned_game(self.store.as_ref(), &request.game_id, &user_id)
+            .await
+            .map_err(status_from_error)?;
+        let store = self.store.clone();
+        let metrics = self.metrics.clone();
+        let (tx, rx) = mpsc::channel(16);
+
+        tokio::spawn(async move {
+            if let Err(error) = run_export_game_stream(game, store, tx.clone()).await {
+                metrics.record_grpc_failure();
+                let _ = tx.send(Err(status_from_error(error))).await;
+            }
+        });
+
+        Ok(Response::new(ReceiverStream::new(rx)))
     }
 }
 
@@ -857,6 +886,81 @@ async fn build_context_for_turn(
         locations,
         recent_messages,
     }))
+}
+
+#[tracing::instrument(skip_all, fields(game_id = %game.id))]
+async fn run_export_game_stream(
+    game: Game,
+    store: Arc<dyn HarpeStore>,
+    tx: mpsc::Sender<std::result::Result<pb::GameBackupChunk, Status>>,
+) -> Result<()> {
+    let game_id = game.id.clone();
+    let mut sequence = 0_u32;
+    send_backup_chunk(&tx, &game_id, "game", &mut sequence, &game).await?;
+
+    let sessions = store.list_sessions(&game_id, 1_000).await?;
+    for session in &sessions {
+        send_backup_chunk(&tx, &game_id, "session", &mut sequence, session).await?;
+        if let Some(summary) = store.get_story_summary(&session.id).await? {
+            send_backup_chunk(&tx, &game_id, "story_summary", &mut sequence, &summary).await?;
+        }
+        for event in store.list_events(&session.id, 1_000).await? {
+            send_backup_chunk(&tx, &game_id, "event", &mut sequence, &event).await?;
+        }
+        for memory in store.list_memory_chunks(&session.id, 1_000).await? {
+            send_backup_chunk(&tx, &game_id, "memory_chunk", &mut sequence, &memory).await?;
+        }
+    }
+
+    for character in store.list_characters(&game_id).await? {
+        send_backup_chunk(&tx, &game_id, "character", &mut sequence, &character).await?;
+    }
+    for fact in store.list_world_facts(&game_id, 1_000).await? {
+        send_backup_chunk(&tx, &game_id, "world_fact", &mut sequence, &fact).await?;
+    }
+    for location in store.list_locations(&game_id).await? {
+        send_backup_chunk(&tx, &game_id, "location", &mut sequence, &location).await?;
+    }
+
+    sequence = sequence.saturating_add(1);
+    let _ = tx
+        .send(Ok(pb::GameBackupChunk {
+            game_id,
+            kind: "done".to_owned(),
+            sequence,
+            payload_json: "{}".to_owned(),
+            done: true,
+        }))
+        .await;
+
+    Ok(())
+}
+
+async fn send_backup_chunk<T: Serialize>(
+    tx: &mpsc::Sender<std::result::Result<pb::GameBackupChunk, Status>>,
+    game_id: &str,
+    kind: &str,
+    sequence: &mut u32,
+    payload: &T,
+) -> Result<()> {
+    *sequence = sequence.saturating_add(1);
+    let payload_json =
+        serde_json::to_string(payload).map_err(|error| HarpeError::Store(error.to_string()))?;
+    if tx
+        .send(Ok(pb::GameBackupChunk {
+            game_id: game_id.to_owned(),
+            kind: kind.to_owned(),
+            sequence: *sequence,
+            payload_json,
+            done: false,
+        }))
+        .await
+        .is_err()
+    {
+        return Ok(());
+    }
+
+    Ok(())
 }
 
 fn optional_user_id(metadata: &MetadataMap) -> Result<Option<String>> {

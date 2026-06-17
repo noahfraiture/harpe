@@ -1551,6 +1551,53 @@ async fn grpc_send_message_streams_response_and_updates_memory() {
     assert_eq!(snapshot.game.unwrap().id, game.id);
     assert_eq!(snapshot.sessions.len(), 1);
     assert_eq!(snapshot.memory_chunks.len(), 5);
+
+    let mut backup_stream = memory_client
+        .export_game_stream(with_user(
+            ExportGameRequest {
+                game_id: game.id.clone(),
+            },
+            &user.id,
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    let mut backup_chunks = Vec::new();
+    while let Some(chunk) = backup_stream.next().await {
+        let chunk = chunk.unwrap();
+        let done = chunk.done;
+        backup_chunks.push(chunk);
+        if done {
+            break;
+        }
+    }
+    assert!(backup_chunks.last().unwrap().done);
+    assert_eq!(backup_chunks[0].kind, "game");
+    assert!(backup_chunks[0].payload_json.contains("Iron Coast"));
+    for (index, chunk) in backup_chunks.iter().enumerate() {
+        assert_eq!(chunk.sequence, u32::try_from(index + 1).unwrap());
+    }
+    let backup_kinds = backup_chunks
+        .iter()
+        .map(|chunk| chunk.kind.as_str())
+        .collect::<Vec<_>>();
+    for expected_kind in [
+        "game",
+        "session",
+        "story_summary",
+        "event",
+        "memory_chunk",
+        "character",
+        "world_fact",
+        "location",
+        "done",
+    ] {
+        assert!(
+            backup_kinds.contains(&expected_kind),
+            "backup stream missing {expected_kind}; got {backup_kinds:?}"
+        );
+    }
+
     let admin_chunks = AdminServiceClient::new(channel.clone())
         .list_memory_chunks(ListMemoryChunksRequest {
             session_id: session.id.clone(),

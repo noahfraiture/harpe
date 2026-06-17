@@ -31,6 +31,7 @@ service MemoryService {
   rpc ListLocations(ListLocationsRequest) returns (ListLocationsResponse);
   rpc SearchMemory(SearchMemoryRequest) returns (SearchMemoryResponse);
   rpc ExportGame(ExportGameRequest) returns (GameSnapshot);
+  rpc ExportGameStream(ExportGameRequest) returns (stream GameBackupChunk);
 }
 
 service HealthService {
@@ -154,6 +155,14 @@ message GameSnapshot {
   repeated Location locations = 7;
   repeated MemoryChunk memory_chunks = 8;
   string exported_at = 9;
+}
+
+message GameBackupChunk {
+  string game_id = 1;
+  string kind = 2;
+  uint32 sequence = 3;
+  string payload_json = 4;
+  bool done = 5;
 }
 
 message PageRequest {
