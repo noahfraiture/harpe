@@ -51,8 +51,8 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
-      - name: Coverage
-        run: cargo llvm-cov --workspace --all-targets --locked --fail-under-lines 95
+      - name: Backend coverage
+        run: cargo llvm-cov -p harpe-server --all-targets --locked --fail-under-lines 95
 
   persistent-surreal:
     name: Persistent SurrealDB

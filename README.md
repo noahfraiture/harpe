@@ -15,6 +15,7 @@ The current milestone is a Rust gRPC server with:
 - typed config, graceful shutdown, Docker assets, and snapshot plus streaming game export for backups
 - in-process counters and latency histograms with Prometheus text export for gRPC requests, streamed messages, job outcomes, and health checks
 - internal admin/debug gRPC methods for background jobs and raw memory chunks
+- a Rust CLI client for health checks, users, games, sessions, memory search/views, metrics, backups, and admin debugging
 - unit tests plus integration tests covering embedded SurrealDB, migration idempotence, graph edges, and a real gRPC client/server path
 
 ## Run
@@ -56,11 +57,51 @@ To run the server with SurrealDB:
 docker compose up --build
 ```
 
+## CLI
+
+The workspace includes a `harpe` command line client:
+
+```sh
+cargo run -p harpe-cli -- health
+```
+
+Defaults:
+
+- `HARPE_GRPC_ADDR=http://[::1]:50051`; bare addresses such as `[::1]:50051` are also accepted
+- `HARPE_USER_ID` can be used instead of passing `--user-id`
+- `--json` switches command output to structured JSON where the command returns a single response
+
+Basic flow:
+
+```sh
+USER_ID=$(cargo run -q -p harpe-cli -- --json user create --name "Noah" | jq -r .id)
+GAME_ID=$(HARPE_USER_ID=$USER_ID cargo run -q -p harpe-cli -- --json game create \
+  --title "Iron Coast" \
+  --system-prompt "Run a tense coastal fantasy adventure." | jq -r .id)
+SESSION_ID=$(HARPE_USER_ID=$USER_ID cargo run -q -p harpe-cli -- --json session create \
+  --game "$GAME_ID" \
+  --title "First watch" | jq -r .id)
+
+HARPE_USER_ID=$USER_ID cargo run -q -p harpe-cli -- session send "$SESSION_ID" "I inspect the sea gate."
+```
+
+Useful read commands:
+
+```sh
+HARPE_USER_ID=$USER_ID cargo run -q -p harpe-cli -- game list
+HARPE_USER_ID=$USER_ID cargo run -q -p harpe-cli -- session messages "$SESSION_ID"
+HARPE_USER_ID=$USER_ID cargo run -q -p harpe-cli -- session context "$SESSION_ID" "I inspect the sea gate."
+HARPE_USER_ID=$USER_ID cargo run -q -p harpe-cli -- memory search "$SESSION_ID" "sea gate"
+HARPE_USER_ID=$USER_ID cargo run -q -p harpe-cli -- backup stream --game "$GAME_ID" > harpe-backup.ndjson
+cargo run -q -p harpe-cli -- metrics export
+cargo run -q -p harpe-cli -- admin jobs --status failed
+```
+
 ## Test
 
 ```sh
-cargo test
-cargo clippy --all-targets --all-features -- -D warnings
+cargo test --workspace --locked
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 ```
 
 The integration tests use SurrealDB's embedded in-memory engine, so no external database is required yet.
