@@ -18,7 +18,38 @@ use crate::engine::cosine_similarity;
 use crate::store::HarpeStore;
 use crate::{HarpeError, Result};
 
-const INDEXED_EMBEDDING_DIMENSIONS: usize = 16;
+const INDEXED_EMBEDDING_DIMENSIONS: &[IndexedEmbeddingDimension] = &[
+    IndexedEmbeddingDimension {
+        dimensions: 16,
+        field: "embedding_16",
+    },
+    IndexedEmbeddingDimension {
+        dimensions: 384,
+        field: "embedding_384",
+    },
+    IndexedEmbeddingDimension {
+        dimensions: 768,
+        field: "embedding_768",
+    },
+    IndexedEmbeddingDimension {
+        dimensions: 1024,
+        field: "embedding_1024",
+    },
+    IndexedEmbeddingDimension {
+        dimensions: 1536,
+        field: "embedding_1536",
+    },
+    IndexedEmbeddingDimension {
+        dimensions: 3072,
+        field: "embedding_3072",
+    },
+];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct IndexedEmbeddingDimension {
+    dimensions: usize,
+    field: &'static str,
+}
 
 const MIGRATION_BOOTSTRAP: &str = r#"
 DEFINE TABLE OVERWRITE schema_migration SCHEMAFULL;
@@ -208,6 +239,22 @@ DEFINE ANALYZER OVERWRITE memory_content_analyzer TOKENIZERS blank, class, camel
 DEFINE FIELD OVERWRITE embedding_16 ON memory_chunk TYPE option<array<float>>;
 DEFINE INDEX OVERWRITE memory_chunk_content_fulltext ON TABLE memory_chunk FIELDS content FULLTEXT ANALYZER memory_content_analyzer BM25;
 DEFINE INDEX OVERWRITE memory_chunk_embedding_16_hnsw ON TABLE memory_chunk FIELDS embedding_16 HNSW DIMENSION 16 DIST COSINE TYPE F32;
+"#,
+    },
+    Migration {
+        version: 6,
+        name: "provider_embedding_indexes",
+        sql: r#"
+DEFINE FIELD OVERWRITE embedding_384 ON memory_chunk TYPE option<array<float>>;
+DEFINE FIELD OVERWRITE embedding_768 ON memory_chunk TYPE option<array<float>>;
+DEFINE FIELD OVERWRITE embedding_1024 ON memory_chunk TYPE option<array<float>>;
+DEFINE FIELD OVERWRITE embedding_1536 ON memory_chunk TYPE option<array<float>>;
+DEFINE FIELD OVERWRITE embedding_3072 ON memory_chunk TYPE option<array<float>>;
+DEFINE INDEX OVERWRITE memory_chunk_embedding_384_hnsw ON TABLE memory_chunk FIELDS embedding_384 HNSW DIMENSION 384 DIST COSINE TYPE F32;
+DEFINE INDEX OVERWRITE memory_chunk_embedding_768_hnsw ON TABLE memory_chunk FIELDS embedding_768 HNSW DIMENSION 768 DIST COSINE TYPE F32;
+DEFINE INDEX OVERWRITE memory_chunk_embedding_1024_hnsw ON TABLE memory_chunk FIELDS embedding_1024 HNSW DIMENSION 1024 DIST COSINE TYPE F32;
+DEFINE INDEX OVERWRITE memory_chunk_embedding_1536_hnsw ON TABLE memory_chunk FIELDS embedding_1536 HNSW DIMENSION 1536 DIST COSINE TYPE F32;
+DEFINE INDEX OVERWRITE memory_chunk_embedding_3072_hnsw ON TABLE memory_chunk FIELDS embedding_3072 HNSW DIMENSION 3072 DIST COSINE TYPE F32;
 "#,
     },
 ];
@@ -1022,7 +1069,12 @@ impl HarpeStore for SurrealStore {
             session_id: input.session_id,
             kind: input.kind,
             content: input.content,
-            embedding_16: fixed_16_embedding(&input.embedding),
+            embedding_16: fixed_embedding(&input.embedding, 16),
+            embedding_384: fixed_embedding(&input.embedding, 384),
+            embedding_768: fixed_embedding(&input.embedding, 768),
+            embedding_1024: fixed_embedding(&input.embedding, 1024),
+            embedding_1536: fixed_embedding(&input.embedding, 1536),
+            embedding_3072: fixed_embedding(&input.embedding, 3072),
             embedding: input.embedding,
             created_at: Utc::now(),
         };
@@ -1080,12 +1132,12 @@ impl HarpeStore for SurrealStore {
         let query = query.trim();
         let mut candidates = Vec::new();
 
-        if query_embedding.len() == INDEXED_EMBEDDING_DIMENSIONS {
+        if let Some(indexed_field) = indexed_embedding_field(query_embedding.len()) {
             let vector_query = format!(
                 "SELECT * FROM memory_chunk
                  WHERE session_id = $session_id
-                   AND embedding_16 != NONE
-                   AND embedding_16 <|{candidate_limit},100|> $query_embedding
+                   AND {indexed_field} != NONE
+                   AND {indexed_field} <|{candidate_limit},100|> $query_embedding
                  LIMIT {candidate_limit}",
             );
             let mut response = self
@@ -1291,8 +1343,15 @@ fn lexical_score(query: &str, content: &str) -> f32 {
     matches as f32 / terms.len() as f32
 }
 
-fn fixed_16_embedding(embedding: &[f32]) -> Option<Vec<f32>> {
-    (embedding.len() == INDEXED_EMBEDDING_DIMENSIONS).then(|| embedding.to_vec())
+fn indexed_embedding_field(dimensions: usize) -> Option<&'static str> {
+    INDEXED_EMBEDDING_DIMENSIONS
+        .iter()
+        .find(|indexed| indexed.dimensions == dimensions)
+        .map(|indexed| indexed.field)
+}
+
+fn fixed_embedding(embedding: &[f32], dimensions: usize) -> Option<Vec<f32>> {
+    (embedding.len() == dimensions).then(|| embedding.to_vec())
 }
 
 fn rank_memory_candidates(
@@ -1596,6 +1655,16 @@ struct MemoryChunkRow {
     content: String,
     #[serde(default)]
     embedding_16: Option<Vec<f32>>,
+    #[serde(default)]
+    embedding_384: Option<Vec<f32>>,
+    #[serde(default)]
+    embedding_768: Option<Vec<f32>>,
+    #[serde(default)]
+    embedding_1024: Option<Vec<f32>>,
+    #[serde(default)]
+    embedding_1536: Option<Vec<f32>>,
+    #[serde(default)]
+    embedding_3072: Option<Vec<f32>>,
     embedding: Vec<f32>,
     created_at: DateTime<Utc>,
 }
@@ -1621,6 +1690,16 @@ struct MemorySearchRow {
     content: String,
     #[serde(default)]
     embedding_16: Option<Vec<f32>>,
+    #[serde(default)]
+    embedding_384: Option<Vec<f32>>,
+    #[serde(default)]
+    embedding_768: Option<Vec<f32>>,
+    #[serde(default)]
+    embedding_1024: Option<Vec<f32>>,
+    #[serde(default)]
+    embedding_1536: Option<Vec<f32>>,
+    #[serde(default)]
+    embedding_3072: Option<Vec<f32>>,
     embedding: Vec<f32>,
     #[serde(default)]
     lexical_score: Option<f32>,
@@ -1651,6 +1730,11 @@ impl From<MemorySearchRow> for MemorySearchCandidate {
                 kind: value.kind,
                 content: value.content,
                 embedding_16: value.embedding_16,
+                embedding_384: value.embedding_384,
+                embedding_768: value.embedding_768,
+                embedding_1024: value.embedding_1024,
+                embedding_1536: value.embedding_1536,
+                embedding_3072: value.embedding_3072,
                 embedding: value.embedding,
                 created_at: value.created_at,
             },
@@ -1709,9 +1793,12 @@ mod tests {
 
     #[test]
     fn fixed_embedding_is_only_populated_for_indexed_dimension() {
-        assert_eq!(fixed_16_embedding(&[1.0; 15]), None);
-        assert_eq!(fixed_16_embedding(&[1.0; 17]), None);
-        assert_eq!(fixed_16_embedding(&[1.0; 16]), Some(vec![1.0; 16]));
+        assert_eq!(indexed_embedding_field(16), Some("embedding_16"));
+        assert_eq!(indexed_embedding_field(1536), Some("embedding_1536"));
+        assert_eq!(indexed_embedding_field(17), None);
+        assert_eq!(fixed_embedding(&[1.0; 15], 16), None);
+        assert_eq!(fixed_embedding(&[1.0; 17], 16), None);
+        assert_eq!(fixed_embedding(&[1.0; 16], 16), Some(vec![1.0; 16]));
     }
 
     #[test]
@@ -1725,6 +1812,11 @@ mod tests {
                     kind: "event".to_owned(),
                     content: "The silver key opens the lower vault.".to_owned(),
                     embedding_16: Some(vec![1.0; 16]),
+                    embedding_384: None,
+                    embedding_768: None,
+                    embedding_1024: None,
+                    embedding_1536: None,
+                    embedding_3072: None,
                     embedding: vec![1.0, 0.0],
                     created_at: now,
                 },
@@ -1737,6 +1829,11 @@ mod tests {
                     kind: "event".to_owned(),
                     content: "The silver key opens the lower vault.".to_owned(),
                     embedding_16: Some(vec![1.0; 16]),
+                    embedding_384: None,
+                    embedding_768: None,
+                    embedding_1024: None,
+                    embedding_1536: None,
+                    embedding_3072: None,
                     embedding: vec![1.0, 0.0],
                     created_at: now,
                 },
@@ -1749,6 +1846,11 @@ mod tests {
                     kind: "event".to_owned(),
                     content: "Unrelated memory.".to_owned(),
                     embedding_16: None,
+                    embedding_384: None,
+                    embedding_768: None,
+                    embedding_1024: None,
+                    embedding_1536: None,
+                    embedding_3072: None,
                     embedding: vec![0.0, 1.0],
                     created_at: now,
                 },

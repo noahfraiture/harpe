@@ -11,7 +11,7 @@ The current milestone is a Rust gRPC server with:
 - a model-aware, budget-aware context builder that ranks story summary, recent events, memories, character state, world facts, locations, and recent messages
 - durable background jobs for turn memory updates with retry/backoff
 - `x-user-id` gRPC metadata checks for user-owned game/session data
-- SurrealDB full-text memory indexing plus optional HNSW vector lookup for 16-dimensional embeddings
+- SurrealDB full-text memory indexing plus HNSW vector lookup for 16, 384, 768, 1024, 1536, and 3072-dimensional embeddings
 - typed config, graceful shutdown, Docker assets, and game snapshot export for backups
 - in-process counters and latency histograms with Prometheus text export for gRPC requests, streamed messages, job outcomes, and health checks
 - internal admin/debug gRPC methods for background jobs and raw memory chunks
