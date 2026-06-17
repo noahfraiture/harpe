@@ -2,6 +2,13 @@
 
 No open backend TODOs.
 
+## Deployment Follow-Ups
+
+- Add private GHCR registry credentials for Fusion so Harpe images can remain private:
+  - create a `kubernetes.io/dockerconfigjson` pull secret in the `harpe` namespace
+  - add the same registry credentials to `ImageRepository/harpe.spec.secretRef` in `flux-system`
+  - wire `imagePullSecrets` through the Harpe Helm chart
+
 ## CLI Testing Follow-Ups
 
 - Test CLI environment variable wiring:
