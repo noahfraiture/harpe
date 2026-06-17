@@ -57,7 +57,6 @@ jobs:
   persistent-surreal:
     name: Persistent SurrealDB
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
 
     steps:
       - name: Checkout
@@ -93,3 +92,35 @@ jobs:
           HARPE_PERSISTENT_SURREALDB_USERNAME: root
           HARPE_PERSISTENT_SURREALDB_PASSWORD: root
         run: cargo test -p harpe-server --test persistent_surreal -- --ignored
+
+  provider-conformance:
+    name: Provider conformance
+    runs-on: ubuntu-latest
+    env:
+      HARPE_PROVIDER_CONFORMANCE_BASE_URL: ${{ secrets.HARPE_PROVIDER_CONFORMANCE_BASE_URL }}
+      HARPE_PROVIDER_CONFORMANCE_API_KEY: ${{ secrets.HARPE_PROVIDER_CONFORMANCE_API_KEY }}
+      HARPE_PROVIDER_CONFORMANCE_CHAT_MODEL: ${{ secrets.HARPE_PROVIDER_CONFORMANCE_CHAT_MODEL }}
+      HARPE_PROVIDER_CONFORMANCE_EXTRACTION_MODEL: ${{ secrets.HARPE_PROVIDER_CONFORMANCE_EXTRACTION_MODEL }}
+      HARPE_PROVIDER_CONFORMANCE_EMBEDDING_MODEL: ${{ secrets.HARPE_PROVIDER_CONFORMANCE_EMBEDDING_MODEL }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run provider conformance test
+        if: env.HARPE_PROVIDER_CONFORMANCE_BASE_URL != '' && env.HARPE_PROVIDER_CONFORMANCE_CHAT_MODEL != '' && env.HARPE_PROVIDER_CONFORMANCE_EXTRACTION_MODEL != '' && env.HARPE_PROVIDER_CONFORMANCE_EMBEDDING_MODEL != ''
+        run: cargo test -p harpe-server --test provider_conformance -- --ignored
+
+      - name: Skip provider conformance test
+        if: env.HARPE_PROVIDER_CONFORMANCE_BASE_URL == '' || env.HARPE_PROVIDER_CONFORMANCE_CHAT_MODEL == '' || env.HARPE_PROVIDER_CONFORMANCE_EXTRACTION_MODEL == '' || env.HARPE_PROVIDER_CONFORMANCE_EMBEDDING_MODEL == ''
+        run: |
+          echo "Skipping provider conformance test because HARPE_PROVIDER_CONFORMANCE_* secrets are not fully configured."
