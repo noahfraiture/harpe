@@ -7,9 +7,9 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, metadata::MetadataMap};
 
 use crate::domain::{
-    Character, Event, Game, GameSnapshot, JobStatus, Location, MemoryChunk, MemoryHit, Message,
-    MessageRole, NewGame, NewMessage, NewSession, NewUser, Session, StorySummary, User, WorldFact,
-    new_id,
+    BackgroundJob, Character, Event, Game, GameSnapshot, JobKind, JobStatus, Location, MemoryChunk,
+    MemoryHit, Message, MessageRole, NewGame, NewMessage, NewSession, NewUser, Session,
+    StorySummary, User, WorldFact, new_id,
 };
 use crate::engine::{ContextBuilder, ContextInputs, estimate_tokens};
 use crate::jobs::{UpdateMemoryAfterTurnPayload, new_update_memory_job};
@@ -18,11 +18,12 @@ use crate::observability::{AppMetrics, MetricsSnapshot as AppMetricsSnapshot, Sh
 use crate::pb::{
     self, ContextMessage, CreateGameRequest, CreateSessionRequest, CreateUserRequest,
     ExportGameRequest, GetCharacterRequest, GetGameRequest, GetMetricsRequest, GetSessionRequest,
-    GetStorySummaryRequest, GetUserRequest, HealthCheckRequest, ListCharactersRequest,
-    ListEventsRequest, ListGamesRequest, ListLocationsRequest, ListMessagesRequest,
-    ListSessionsRequest, ListWorldFactsRequest, MessageDelta, PreviewContextRequest,
-    SearchMemoryRequest, SendMessageRequest, game_service_server, health_service_server,
-    memory_service_server, metrics_service_server, session_service_server, user_service_server,
+    GetStorySummaryRequest, GetUserRequest, HealthCheckRequest, ListBackgroundJobsRequest,
+    ListCharactersRequest, ListEventsRequest, ListGamesRequest, ListLocationsRequest,
+    ListMemoryChunksRequest, ListMessagesRequest, ListSessionsRequest, ListWorldFactsRequest,
+    MessageDelta, PreviewContextRequest, SearchMemoryRequest, SendMessageRequest,
+    admin_service_server, game_service_server, health_service_server, memory_service_server,
+    metrics_service_server, session_service_server, user_service_server,
 };
 use crate::store::HarpeStore;
 use crate::{HarpeError, Result};
@@ -568,6 +569,59 @@ impl metrics_service_server::MetricsService for HarpeGrpc {
     }
 }
 
+#[tonic::async_trait]
+impl admin_service_server::AdminService for HarpeGrpc {
+    async fn list_background_jobs(
+        &self,
+        request: Request<ListBackgroundJobsRequest>,
+    ) -> std::result::Result<Response<pb::ListBackgroundJobsResponse>, Status> {
+        self.metrics.record_grpc_request();
+        tracing::debug!(rpc = "AdminService.ListBackgroundJobs");
+        let request = request.into_inner();
+        let status = admin_job_status_filter(request.status).map_err(status_from_error)?;
+        let jobs = self
+            .store
+            .list_jobs(status, request_limit(request.limit, request.page.as_ref()))
+            .await
+            .map_err(status_from_error)?
+            .into_iter()
+            .map(background_job_to_pb)
+            .collect::<Vec<_>>();
+        let page = Some(page_info(jobs.len()));
+
+        Ok(Response::new(pb::ListBackgroundJobsResponse { jobs, page }))
+    }
+
+    async fn list_memory_chunks(
+        &self,
+        request: Request<ListMemoryChunksRequest>,
+    ) -> std::result::Result<Response<pb::ListMemoryChunksResponse>, Status> {
+        self.metrics.record_grpc_request();
+        tracing::debug!(rpc = "AdminService.ListMemoryChunks");
+        let request = request.into_inner();
+        if request.session_id.trim().is_empty() {
+            return Err(status_from_error(HarpeError::Validation(
+                "session id is required".to_owned(),
+            )));
+        }
+
+        let chunks = self
+            .store
+            .list_memory_chunks(
+                &request.session_id,
+                request_limit(request.limit, request.page.as_ref()),
+            )
+            .await
+            .map_err(status_from_error)?
+            .into_iter()
+            .map(memory_chunk_to_pb)
+            .collect::<Vec<_>>();
+        let page = Some(page_info(chunks.len()));
+
+        Ok(Response::new(pb::ListMemoryChunksResponse { chunks, page }))
+    }
+}
+
 async fn run_send_message(
     request: SendMessageRequest,
     user_id: String,
@@ -973,6 +1027,22 @@ fn memory_chunk_to_pb(chunk: MemoryChunk) -> pb::MemoryChunk {
     }
 }
 
+fn background_job_to_pb(job: BackgroundJob) -> pb::BackgroundJobDebug {
+    pb::BackgroundJobDebug {
+        id: job.id,
+        kind: admin_job_kind_to_pb(job.kind),
+        status: admin_job_status_to_pb(job.status),
+        payload_json: serde_json::to_string(&job.payload)
+            .unwrap_or_else(|error| format!("{{\"error\":\"{error}\"}}")),
+        attempts: job.attempts,
+        max_attempts: job.max_attempts,
+        last_error: job.last_error.unwrap_or_default(),
+        run_after: job.run_after.to_rfc3339(),
+        created_at: job.created_at.to_rfc3339(),
+        updated_at: job.updated_at.to_rfc3339(),
+    }
+}
+
 fn snapshot_to_pb(snapshot: GameSnapshot) -> pb::GameSnapshot {
     pb::GameSnapshot {
         game: Some(game_to_pb(snapshot.game)),
@@ -1041,6 +1111,34 @@ fn role_to_pb(role: MessageRole) -> i32 {
         MessageRole::System => pb::MessageRole::System as i32,
         MessageRole::User => pb::MessageRole::User as i32,
         MessageRole::Assistant => pb::MessageRole::Assistant as i32,
+    }
+}
+
+fn admin_job_kind_to_pb(kind: JobKind) -> i32 {
+    match kind {
+        JobKind::UpdateMemoryAfterTurn => pb::AdminJobKind::UpdateMemoryAfterTurn as i32,
+    }
+}
+
+fn admin_job_status_to_pb(status: JobStatus) -> i32 {
+    match status {
+        JobStatus::Pending => pb::AdminJobStatus::Pending as i32,
+        JobStatus::Running => pb::AdminJobStatus::Running as i32,
+        JobStatus::Succeeded => pb::AdminJobStatus::Succeeded as i32,
+        JobStatus::Failed => pb::AdminJobStatus::Failed as i32,
+    }
+}
+
+fn admin_job_status_filter(status: i32) -> Result<Option<JobStatus>> {
+    match pb::AdminJobStatus::try_from(status) {
+        Ok(pb::AdminJobStatus::Unspecified) => Ok(None),
+        Ok(pb::AdminJobStatus::Pending) => Ok(Some(JobStatus::Pending)),
+        Ok(pb::AdminJobStatus::Running) => Ok(Some(JobStatus::Running)),
+        Ok(pb::AdminJobStatus::Succeeded) => Ok(Some(JobStatus::Succeeded)),
+        Ok(pb::AdminJobStatus::Failed) => Ok(Some(JobStatus::Failed)),
+        Err(_) => Err(HarpeError::Validation(format!(
+            "unknown admin job status {status}"
+        ))),
     }
 }
 
@@ -1157,6 +1255,22 @@ mod tests {
         truncate_to_limit(&mut items, 2);
         assert_eq!(items, vec![1, 2]);
         assert_eq!(page_info(items.len()).returned_count, 2);
+    }
+
+    #[test]
+    fn admin_job_status_filter_maps_proto_statuses() {
+        assert_eq!(
+            admin_job_status_filter(pb::AdminJobStatus::Unspecified as i32).unwrap(),
+            None
+        );
+        assert_eq!(
+            admin_job_status_filter(pb::AdminJobStatus::Failed as i32).unwrap(),
+            Some(JobStatus::Failed)
+        );
+        assert!(matches!(
+            admin_job_status_filter(99),
+            Err(HarpeError::Validation(_))
+        ));
     }
 
     #[test]

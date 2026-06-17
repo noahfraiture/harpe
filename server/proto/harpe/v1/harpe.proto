@@ -41,6 +41,11 @@ service MetricsService {
   rpc GetMetrics(GetMetricsRequest) returns (MetricsSnapshot);
 }
 
+service AdminService {
+  rpc ListBackgroundJobs(ListBackgroundJobsRequest) returns (ListBackgroundJobsResponse);
+  rpc ListMemoryChunks(ListMemoryChunksRequest) returns (ListMemoryChunksResponse);
+}
+
 message User {
   string id = 1;
   string display_name = 2;
@@ -354,4 +359,52 @@ message MetricsSnapshot {
   uint64 jobs_failed = 7;
   uint64 health_checks = 8;
   string collected_at = 9;
+}
+
+enum AdminJobKind {
+  ADMIN_JOB_KIND_UNSPECIFIED = 0;
+  ADMIN_JOB_KIND_UPDATE_MEMORY_AFTER_TURN = 1;
+}
+
+enum AdminJobStatus {
+  ADMIN_JOB_STATUS_UNSPECIFIED = 0;
+  ADMIN_JOB_STATUS_PENDING = 1;
+  ADMIN_JOB_STATUS_RUNNING = 2;
+  ADMIN_JOB_STATUS_SUCCEEDED = 3;
+  ADMIN_JOB_STATUS_FAILED = 4;
+}
+
+message BackgroundJobDebug {
+  string id = 1;
+  AdminJobKind kind = 2;
+  AdminJobStatus status = 3;
+  string payload_json = 4;
+  int32 attempts = 5;
+  int32 max_attempts = 6;
+  string last_error = 7;
+  string run_after = 8;
+  string created_at = 9;
+  string updated_at = 10;
+}
+
+message ListBackgroundJobsRequest {
+  AdminJobStatus status = 1;
+  uint32 limit = 2;
+  PageRequest page = 10;
+}
+
+message ListBackgroundJobsResponse {
+  repeated BackgroundJobDebug jobs = 1;
+  PageInfo page = 10;
+}
+
+message ListMemoryChunksRequest {
+  string session_id = 1;
+  uint32 limit = 2;
+  PageRequest page = 10;
+}
+
+message ListMemoryChunksResponse {
+  repeated MemoryChunk chunks = 1;
+  PageInfo page = 10;
 }

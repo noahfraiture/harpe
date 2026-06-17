@@ -14,6 +14,7 @@ The current milestone is a Rust gRPC server with:
 - SurrealDB full-text memory indexing plus optional HNSW vector lookup for 16-dimensional embeddings
 - typed config, graceful shutdown, Docker assets, and game snapshot export for backups
 - in-process counters for gRPC requests, streamed messages, job outcomes, and health checks
+- internal admin/debug gRPC methods for background jobs and raw memory chunks
 - unit tests plus integration tests covering embedded SurrealDB, migration idempotence, graph edges, and a real gRPC client/server path
 
 ## Run

@@ -18,6 +18,8 @@ use harpe_server::llm::{
     ChatRequest, EchoLlm, ExtractMemoryRequest, LlmClient, SummarizeRequest, TextStream,
 };
 use harpe_server::observability::AppMetrics;
+use harpe_server::pb::admin_service_client::AdminServiceClient;
+use harpe_server::pb::admin_service_server::AdminServiceServer;
 use harpe_server::pb::game_service_client::GameServiceClient;
 use harpe_server::pb::game_service_server::GameServiceServer;
 use harpe_server::pb::health_service_client::HealthServiceClient;
@@ -32,9 +34,10 @@ use harpe_server::pb::user_service_client::UserServiceClient;
 use harpe_server::pb::user_service_server::UserServiceServer;
 use harpe_server::pb::{
     CreateGameRequest, CreateSessionRequest, CreateUserRequest, ExportGameRequest, GetGameRequest,
-    GetMetricsRequest, GetStorySummaryRequest, HealthCheckRequest, ListGamesRequest,
-    ListMessagesRequest, ListSessionsRequest, ListWorldFactsRequest, PageRequest,
-    PreviewContextRequest, SearchMemoryRequest, SendMessageRequest,
+    GetMetricsRequest, GetStorySummaryRequest, HealthCheckRequest, ListBackgroundJobsRequest,
+    ListGamesRequest, ListMemoryChunksRequest, ListMessagesRequest, ListSessionsRequest,
+    ListWorldFactsRequest, PageRequest, PreviewContextRequest, SearchMemoryRequest,
+    SendMessageRequest,
 };
 use harpe_server::store::HarpeStore;
 use tokio::net::TcpListener;
@@ -1080,6 +1083,26 @@ async fn grpc_send_message_streams_response_and_updates_memory() {
     );
     assert_eq!(degraded_health.failed_jobs, 1);
     assert_eq!(degraded_health.service, "harpe.v1.MemoryService");
+    let failed_jobs = AdminServiceClient::new(channel.clone())
+        .list_background_jobs(ListBackgroundJobsRequest {
+            status: harpe_server::pb::AdminJobStatus::Failed as i32,
+            limit: 10,
+            page: None,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(failed_jobs.jobs.len(), 1);
+    assert_eq!(
+        failed_jobs.jobs[0].status,
+        harpe_server::pb::AdminJobStatus::Failed as i32
+    );
+    assert!(
+        failed_jobs.jobs[0]
+            .payload_json
+            .contains("failed-health-check-job")
+    );
+    assert_eq!(failed_jobs.page.unwrap().returned_count, 1);
 
     let mut user_client = UserServiceClient::new(channel.clone());
     let user = user_client
@@ -1398,6 +1421,22 @@ async fn grpc_send_message_streams_response_and_updates_memory() {
     assert_eq!(snapshot.game.unwrap().id, game.id);
     assert_eq!(snapshot.sessions.len(), 1);
     assert_eq!(snapshot.memory_chunks.len(), 5);
+    let admin_chunks = AdminServiceClient::new(channel.clone())
+        .list_memory_chunks(ListMemoryChunksRequest {
+            session_id: session.id.clone(),
+            limit: 10,
+            page: None,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(admin_chunks.page.unwrap().returned_count, 5);
+    assert!(
+        admin_chunks
+            .chunks
+            .iter()
+            .any(|chunk| chunk.kind == "world_fact")
+    );
 
     let metrics_snapshot = MetricsServiceClient::new(channel)
         .get_metrics(GetMetricsRequest {})
@@ -1431,6 +1470,7 @@ async fn spawn_grpc_service(
     let addr = listener.local_addr().unwrap();
     let server = tokio::spawn(
         Server::builder()
+            .add_service(AdminServiceServer::new(service.clone()))
             .add_service(HealthServiceServer::new(service.clone()))
             .add_service(MetricsServiceServer::new(service.clone()))
             .add_service(UserServiceServer::new(service.clone()))

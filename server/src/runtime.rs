@@ -13,6 +13,7 @@ use crate::db::surreal::{SurrealCredentials, SurrealStore};
 use crate::jobs::JobRunner;
 use crate::llm::{EchoLlm, HttpLlm, LlmClient};
 use crate::observability::{AppMetrics, SharedMetrics};
+use crate::pb::admin_service_server::AdminServiceServer;
 use crate::pb::game_service_server::GameServiceServer;
 use crate::pb::health_service_server::HealthServiceServer;
 use crate::pb::memory_service_server::MemoryServiceServer;
@@ -129,6 +130,7 @@ pub async fn serve_grpc(
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> std::result::Result<(), tonic::transport::Error> {
     Server::builder()
+        .add_service(AdminServiceServer::new(service.clone()))
         .add_service(HealthServiceServer::new(service.clone()))
         .add_service(MetricsServiceServer::new(service.clone()))
         .add_service(UserServiceServer::new(service.clone()))
