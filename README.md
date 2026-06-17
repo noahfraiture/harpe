@@ -28,6 +28,7 @@ Defaults:
 - `SURREALDB_ENDPOINT=memory`
 - `SURREALDB_NAMESPACE=harpe`
 - `SURREALDB_DATABASE=dev`
+- `SURREALDB_USERNAME` and `SURREALDB_PASSWORD` are optional; set both when connecting to an authenticated SurrealDB server
 - `HARPE_LLM_PROVIDER=echo`
 - `HARPE_JOB_INTERVAL_MS=2000`
 - `HARPE_JOB_BATCH_LIMIT=25`
@@ -58,3 +59,13 @@ cargo clippy --all-targets --all-features -- -D warnings
 ```
 
 The integration tests use SurrealDB's embedded in-memory engine, so no external database is required yet.
+
+To run the ignored persistent SurrealDB test against the compose database:
+
+```sh
+docker compose up -d surrealdb
+HARPE_PERSISTENT_SURREALDB_ENDPOINT=ws://127.0.0.1:8000 \
+HARPE_PERSISTENT_SURREALDB_USERNAME=root \
+HARPE_PERSISTENT_SURREALDB_PASSWORD=root \
+cargo test -p harpe-server --test persistent_surreal -- --ignored
+```

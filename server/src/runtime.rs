@@ -9,7 +9,7 @@ use tracing::info;
 use crate::Result;
 use crate::api::grpc::HarpeGrpc;
 use crate::config::{AppConfig, AppLlmConfig};
-use crate::db::surreal::SurrealStore;
+use crate::db::surreal::{SurrealCredentials, SurrealStore};
 use crate::jobs::JobRunner;
 use crate::llm::{EchoLlm, HttpLlm, LlmClient};
 use crate::observability::{AppMetrics, SharedMetrics};
@@ -53,11 +53,21 @@ pub async fn build_runtime_parts(config: &AppConfig) -> Result<RuntimeParts> {
 }
 
 pub async fn store_from_config(config: &AppConfig) -> Result<Arc<SurrealStore>> {
+    let credentials = config
+        .surreal_username
+        .as_ref()
+        .zip(config.surreal_password.as_ref())
+        .map(|(username, password)| SurrealCredentials {
+            username: username.clone(),
+            password: password.clone(),
+        });
+
     Ok(Arc::new(
-        SurrealStore::connect(
+        SurrealStore::connect_with_credentials(
             config.surreal_endpoint.clone(),
             &config.surreal_namespace,
             &config.surreal_database,
+            credentials,
         )
         .await?,
     ))
@@ -153,6 +163,8 @@ mod tests {
             surreal_endpoint: "memory".to_owned(),
             surreal_namespace: "harpe".to_owned(),
             surreal_database: format!("runtime_test_{}", Uuid::now_v7()),
+            surreal_username: None,
+            surreal_password: None,
             llm: AppLlmConfig::Echo,
             job_interval: Duration::from_millis(50),
             job_batch_limit: 2,

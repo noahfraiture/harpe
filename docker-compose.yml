@@ -23,6 +23,8 @@ services:
       SURREALDB_ENDPOINT: ws://surrealdb:8000
       SURREALDB_NAMESPACE: harpe
       SURREALDB_DATABASE: dev
+      SURREALDB_USERNAME: root
+      SURREALDB_PASSWORD: root
       HARPE_LLM_PROVIDER: echo
       HARPE_JOB_INTERVAL_MS: "2000"
       HARPE_JOB_BATCH_LIMIT: "25"

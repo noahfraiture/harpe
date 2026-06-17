@@ -10,6 +10,8 @@ pub struct AppConfig {
     pub surreal_endpoint: String,
     pub surreal_namespace: String,
     pub surreal_database: String,
+    pub surreal_username: Option<String>,
+    pub surreal_password: Option<String>,
     pub llm: AppLlmConfig,
     pub job_interval: Duration,
     pub job_batch_limit: usize,
@@ -34,6 +36,13 @@ impl AppConfig {
         let surreal_endpoint = var("SURREALDB_ENDPOINT").unwrap_or_else(|| "memory".to_owned());
         let surreal_namespace = var("SURREALDB_NAMESPACE").unwrap_or_else(|| "harpe".to_owned());
         let surreal_database = var("SURREALDB_DATABASE").unwrap_or_else(|| "dev".to_owned());
+        let surreal_username = optional_non_empty(var("SURREALDB_USERNAME"));
+        let surreal_password = optional_non_empty(var("SURREALDB_PASSWORD"));
+        if surreal_username.is_some() != surreal_password.is_some() {
+            return Err(HarpeError::Validation(
+                "SURREALDB_USERNAME and SURREALDB_PASSWORD must be provided together".to_owned(),
+            ));
+        }
         let llm = match var("HARPE_LLM_PROVIDER")
             .unwrap_or_else(|| "echo".to_owned())
             .trim()
@@ -82,6 +91,8 @@ impl AppConfig {
             surreal_endpoint,
             surreal_namespace,
             surreal_database,
+            surreal_username,
+            surreal_password,
             llm,
             job_interval: Duration::from_millis(parse_u64(
                 var("HARPE_JOB_INTERVAL_MS")
@@ -97,6 +108,13 @@ impl AppConfig {
             )?,
         })
     }
+}
+
+fn optional_non_empty(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_owned())
+    })
 }
 
 fn required_var(var: &mut impl FnMut(&str) -> Option<String>, key: &str) -> Result<String> {
@@ -140,6 +158,8 @@ mod tests {
         assert_eq!(config.surreal_endpoint, "memory");
         assert_eq!(config.surreal_namespace, "harpe");
         assert_eq!(config.surreal_database, "dev");
+        assert_eq!(config.surreal_username, None);
+        assert_eq!(config.surreal_password, None);
         assert_eq!(config.llm, AppLlmConfig::Echo);
         assert_eq!(config.job_interval, Duration::from_secs(2));
         assert_eq!(config.job_batch_limit, 25);
@@ -149,6 +169,8 @@ mod tests {
     fn config_builds_http_llm_settings_from_vars() {
         let vars = HashMap::from([
             ("HARPE_GRPC_ADDR", "127.0.0.1:50051"),
+            ("SURREALDB_USERNAME", "root"),
+            ("SURREALDB_PASSWORD", "root"),
             ("HARPE_LLM_PROVIDER", "http"),
             ("HARPE_LLM_BASE_URL", "http://localhost:11434"),
             ("HARPE_LLM_API_KEY", "secret"),
@@ -165,6 +187,8 @@ mod tests {
         let config = AppConfig::from_vars(|key| vars.get(key).map(ToString::to_string)).unwrap();
 
         assert_eq!(config.grpc_addr.to_string(), "127.0.0.1:50051");
+        assert_eq!(config.surreal_username.as_deref(), Some("root"));
+        assert_eq!(config.surreal_password.as_deref(), Some("root"));
         assert_eq!(config.job_interval, Duration::from_millis(500));
         assert_eq!(config.job_batch_limit, 7);
         assert_eq!(
@@ -193,6 +217,14 @@ mod tests {
         })
         .unwrap_err();
         assert!(matches!(invalid_addr, HarpeError::Validation(_)));
+
+        let partial_surreal_credentials =
+            AppConfig::from_vars(|key| (key == "SURREALDB_USERNAME").then(|| "root".to_owned()))
+                .unwrap_err();
+        assert!(matches!(
+            partial_surreal_credentials,
+            HarpeError::Validation(_)
+        ));
 
         let missing_model =
             AppConfig::from_vars(|key| (key == "HARPE_LLM_PROVIDER").then(|| "http".to_owned()))

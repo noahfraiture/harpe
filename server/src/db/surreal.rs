@@ -5,6 +5,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use surrealdb::Surreal;
 use surrealdb::engine::any::{self, Any};
+use surrealdb::opt::auth::Root;
 use surrealdb::types::{RecordId, SurrealValue, ToSql};
 
 use crate::domain::{
@@ -230,13 +231,35 @@ pub struct SurrealStore {
     db: Arc<Surreal<Any>>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SurrealCredentials {
+    pub username: String,
+    pub password: String,
+}
+
 impl SurrealStore {
     pub async fn connect(
         endpoint: impl Into<String>,
         namespace: &str,
         database: &str,
     ) -> Result<Self> {
+        Self::connect_with_credentials(endpoint, namespace, database, None).await
+    }
+
+    pub async fn connect_with_credentials(
+        endpoint: impl Into<String>,
+        namespace: &str,
+        database: &str,
+        credentials: Option<SurrealCredentials>,
+    ) -> Result<Self> {
         let db = any::connect(endpoint.into()).await?;
+        if let Some(credentials) = credentials {
+            db.signin(Root {
+                username: credentials.username,
+                password: credentials.password,
+            })
+            .await?;
+        }
         db.use_ns(namespace).use_db(database).await?;
 
         let store = Self { db: Arc::new(db) };
