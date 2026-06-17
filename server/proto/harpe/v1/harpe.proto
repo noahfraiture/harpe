@@ -43,6 +43,8 @@ service MetricsService {
 
 service AdminService {
   rpc ListBackgroundJobs(ListBackgroundJobsRequest) returns (ListBackgroundJobsResponse);
+  rpc RetryBackgroundJob(RetryBackgroundJobRequest) returns (BackgroundJobDebug);
+  rpc PurgeBackgroundJob(PurgeBackgroundJobRequest) returns (BackgroundJobDebug);
   rpc ListMemoryChunks(ListMemoryChunksRequest) returns (ListMemoryChunksResponse);
 }
 
@@ -396,6 +398,15 @@ message ListBackgroundJobsRequest {
 message ListBackgroundJobsResponse {
   repeated BackgroundJobDebug jobs = 1;
   PageInfo page = 10;
+}
+
+message RetryBackgroundJobRequest {
+  string job_id = 1;
+  int32 max_attempts = 2;
+}
+
+message PurgeBackgroundJobRequest {
+  string job_id = 1;
 }
 
 message ListMemoryChunksRequest {

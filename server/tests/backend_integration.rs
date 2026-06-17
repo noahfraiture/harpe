@@ -8,7 +8,7 @@ use harpe_server::HarpeError;
 use harpe_server::api::grpc::HarpeGrpc;
 use harpe_server::db::surreal::SurrealStore;
 use harpe_server::domain::{
-    ExtractedCharacterUpdate, ExtractedEvent, ExtractedLocation, ExtractedWorldFact,
+    BackgroundJob, ExtractedCharacterUpdate, ExtractedEvent, ExtractedLocation, ExtractedWorldFact,
     GraphRelationKind, JobKind, JobStatus, MemoryExtraction, MessageRole, NewBackgroundJob,
     NewEvent, NewGame, NewMemoryChunk, NewMessage, NewSession, NewUser, UpsertCharacter,
     UpsertLocation, UpsertStorySummary, UpsertWorldFact,
@@ -36,8 +36,8 @@ use harpe_server::pb::{
     CreateGameRequest, CreateSessionRequest, CreateUserRequest, ExportGameRequest, GetGameRequest,
     GetMetricsRequest, GetStorySummaryRequest, HealthCheckRequest, ListBackgroundJobsRequest,
     ListGamesRequest, ListMemoryChunksRequest, ListMessagesRequest, ListSessionsRequest,
-    ListWorldFactsRequest, PageRequest, PreviewContextRequest, SearchMemoryRequest,
-    SendMessageRequest,
+    ListWorldFactsRequest, PageRequest, PreviewContextRequest, PurgeBackgroundJobRequest,
+    RetryBackgroundJobRequest, SearchMemoryRequest, SendMessageRequest,
 };
 use harpe_server::store::HarpeStore;
 use tokio::net::TcpListener;
@@ -557,6 +557,108 @@ async fn surreal_store_claims_completes_and_fails_background_jobs() {
     assert_eq!(failed.id, failing_job.id);
     assert_eq!(failed.status, JobStatus::Failed);
     assert_eq!(failed.last_error.as_deref(), Some("model timeout"));
+
+    let retried = store.retry_failed_job(&failed.id, Some(4)).await.unwrap();
+    assert_eq!(retried.status, JobStatus::Pending);
+    assert_eq!(retried.attempts, 0);
+    assert_eq!(retried.max_attempts, 4);
+    assert_eq!(retried.last_error, None);
+    assert!(retried.run_after <= Utc::now());
+    assert_validation(
+        store.purge_failed_job(&retried.id).await.unwrap_err(),
+        "not failed",
+    );
+
+    store
+        .enqueue_job(NewBackgroundJob {
+            kind: JobKind::UpdateMemoryAfterTurn,
+            payload: serde_json::json!({"session_id": "session-3"}),
+            max_attempts: 3,
+            run_after: Some(Utc::now() - chrono::Duration::seconds(1)),
+        })
+        .await
+        .unwrap();
+    let purge_target = store.claim_next_job().await.unwrap().unwrap();
+    store
+        .fail_job(&purge_target.id, "delete me".to_owned())
+        .await
+        .unwrap();
+    let purged = store.purge_failed_job(&purge_target.id).await.unwrap();
+    assert_eq!(purged.id, purge_target.id);
+    assert_not_found(
+        store.purge_failed_job(&purge_target.id).await.unwrap_err(),
+        &purge_target.id,
+    );
+}
+
+#[tokio::test]
+async fn admin_service_retries_and_purges_dead_letter_jobs() {
+    let store = Arc::new(test_store().await);
+    let service = HarpeGrpc::new(store.clone(), Arc::new(EchoLlm::development_default()));
+    let (channel, server) = spawn_grpc_service(service).await;
+
+    let failed_retry_target = failed_test_job(&store, "retry-target").await;
+    let failed_purge_target = failed_test_job(&store, "purge-target").await;
+    let mut admin = AdminServiceClient::new(channel);
+
+    let retried = admin
+        .retry_background_job(RetryBackgroundJobRequest {
+            job_id: failed_retry_target.id.clone(),
+            max_attempts: 5,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(retried.id, failed_retry_target.id);
+    assert_eq!(
+        retried.status,
+        harpe_server::pb::AdminJobStatus::Pending as i32
+    );
+    assert_eq!(retried.attempts, 0);
+    assert_eq!(retried.max_attempts, 5);
+    assert_eq!(retried.last_error, "");
+
+    let retry_non_failed = admin
+        .retry_background_job(RetryBackgroundJobRequest {
+            job_id: failed_retry_target.id,
+            max_attempts: 0,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(retry_non_failed.code(), Code::InvalidArgument);
+
+    let purged = admin
+        .purge_background_job(PurgeBackgroundJobRequest {
+            job_id: failed_purge_target.id.clone(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(purged.id, failed_purge_target.id);
+    assert_eq!(
+        purged.status,
+        harpe_server::pb::AdminJobStatus::Failed as i32
+    );
+    let missing_purged = admin
+        .purge_background_job(PurgeBackgroundJobRequest {
+            job_id: failed_purge_target.id,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(missing_purged.code(), Code::NotFound);
+
+    let failed_jobs = admin
+        .list_background_jobs(ListBackgroundJobsRequest {
+            status: harpe_server::pb::AdminJobStatus::Failed as i32,
+            limit: 10,
+            page: None,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(failed_jobs.jobs.is_empty());
+
+    server.abort();
 }
 
 #[tokio::test]
@@ -1456,6 +1558,24 @@ async fn grpc_send_message_streams_response_and_updates_memory() {
 
 async fn test_store() -> SurrealStore {
     SurrealStore::connect("memory", &format!("test_{}", Uuid::now_v7()), "harpe")
+        .await
+        .unwrap()
+}
+
+async fn failed_test_job(store: &SurrealStore, session_id: &str) -> BackgroundJob {
+    store
+        .enqueue_job(NewBackgroundJob {
+            kind: JobKind::UpdateMemoryAfterTurn,
+            payload: serde_json::json!({ "session_id": session_id }),
+            max_attempts: 1,
+            run_after: Some(Utc::now() - chrono::Duration::seconds(1)),
+        })
+        .await
+        .unwrap();
+    let job = store.claim_next_job().await.unwrap().unwrap();
+
+    store
+        .fail_job(&job.id, format!("failed {session_id}"))
         .await
         .unwrap()
 }

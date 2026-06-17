@@ -21,9 +21,10 @@ use crate::pb::{
     GetStorySummaryRequest, GetUserRequest, HealthCheckRequest, ListBackgroundJobsRequest,
     ListCharactersRequest, ListEventsRequest, ListGamesRequest, ListLocationsRequest,
     ListMemoryChunksRequest, ListMessagesRequest, ListSessionsRequest, ListWorldFactsRequest,
-    MessageDelta, PreviewContextRequest, SearchMemoryRequest, SendMessageRequest,
-    admin_service_server, game_service_server, health_service_server, memory_service_server,
-    metrics_service_server, session_service_server, user_service_server,
+    MessageDelta, PreviewContextRequest, PurgeBackgroundJobRequest, RetryBackgroundJobRequest,
+    SearchMemoryRequest, SendMessageRequest, admin_service_server, game_service_server,
+    health_service_server, memory_service_server, metrics_service_server, session_service_server,
+    user_service_server,
 };
 use crate::store::HarpeStore;
 use crate::{HarpeError, Result};
@@ -592,6 +593,41 @@ impl admin_service_server::AdminService for HarpeGrpc {
         Ok(Response::new(pb::ListBackgroundJobsResponse { jobs, page }))
     }
 
+    async fn retry_background_job(
+        &self,
+        request: Request<RetryBackgroundJobRequest>,
+    ) -> std::result::Result<Response<pb::BackgroundJobDebug>, Status> {
+        self.metrics.record_grpc_request();
+        tracing::debug!(rpc = "AdminService.RetryBackgroundJob");
+        let request = request.into_inner();
+        validate_job_id(&request.job_id).map_err(status_from_error)?;
+        let max_attempts = (request.max_attempts > 0).then_some(request.max_attempts);
+        let job = self
+            .store
+            .retry_failed_job(&request.job_id, max_attempts)
+            .await
+            .map_err(status_from_error)?;
+
+        Ok(Response::new(background_job_to_pb(job)))
+    }
+
+    async fn purge_background_job(
+        &self,
+        request: Request<PurgeBackgroundJobRequest>,
+    ) -> std::result::Result<Response<pb::BackgroundJobDebug>, Status> {
+        self.metrics.record_grpc_request();
+        tracing::debug!(rpc = "AdminService.PurgeBackgroundJob");
+        let request = request.into_inner();
+        validate_job_id(&request.job_id).map_err(status_from_error)?;
+        let job = self
+            .store
+            .purge_failed_job(&request.job_id)
+            .await
+            .map_err(status_from_error)?;
+
+        Ok(Response::new(background_job_to_pb(job)))
+    }
+
     async fn list_memory_chunks(
         &self,
         request: Request<ListMemoryChunksRequest>,
@@ -1140,6 +1176,14 @@ fn admin_job_status_filter(status: i32) -> Result<Option<JobStatus>> {
             "unknown admin job status {status}"
         ))),
     }
+}
+
+fn validate_job_id(job_id: &str) -> Result<()> {
+    if job_id.trim().is_empty() {
+        return Err(HarpeError::Validation("job id is required".to_owned()));
+    }
+
+    Ok(())
 }
 
 fn saturating_u32(value: usize) -> u32 {

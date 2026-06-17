@@ -592,6 +592,67 @@ impl HarpeStore for SurrealStore {
             .await
     }
 
+    async fn retry_failed_job(
+        &self,
+        job_id: &str,
+        max_attempts: Option<i32>,
+    ) -> Result<BackgroundJob> {
+        let mut row: JobRow = self
+            .db
+            .select(("background_job", job_id))
+            .await?
+            .ok_or_else(|| HarpeError::NotFound(format!("background job {job_id}")))?;
+        let status = JobStatus::from_db_value(&row.status)
+            .ok_or_else(|| HarpeError::Store(format!("unknown job status {}", row.status)))?;
+        if status != JobStatus::Failed {
+            return Err(HarpeError::Validation(format!(
+                "background job {job_id} is not failed"
+            )));
+        }
+
+        row.status = JobStatus::Pending.as_db_value().to_owned();
+        row.attempts = 0;
+        if let Some(max_attempts) = max_attempts {
+            row.max_attempts = normalize_max_attempts(max_attempts);
+        }
+        row.last_error = None;
+        row.run_after = Utc::now();
+        row.updated_at = Utc::now();
+
+        let updated: Option<JobRow> = self
+            .db
+            .update(("background_job", row.uid.as_str()))
+            .content(row)
+            .await?;
+
+        updated
+            .map(TryInto::try_into)
+            .transpose()?
+            .ok_or_else(|| HarpeError::Store("SurrealDB did not return retried job".to_owned()))
+    }
+
+    async fn purge_failed_job(&self, job_id: &str) -> Result<BackgroundJob> {
+        let row: JobRow = self
+            .db
+            .select(("background_job", job_id))
+            .await?
+            .ok_or_else(|| HarpeError::NotFound(format!("background job {job_id}")))?;
+        let status = JobStatus::from_db_value(&row.status)
+            .ok_or_else(|| HarpeError::Store(format!("unknown job status {}", row.status)))?;
+        if status != JobStatus::Failed {
+            return Err(HarpeError::Validation(format!(
+                "background job {job_id} is not failed"
+            )));
+        }
+
+        let deleted: Option<JobRow> = self.db.delete(("background_job", job_id)).await?;
+
+        deleted
+            .map(TryInto::try_into)
+            .transpose()?
+            .ok_or_else(|| HarpeError::Store("SurrealDB did not return purged job".to_owned()))
+    }
+
     async fn create_session(&self, input: NewSession) -> Result<Session> {
         validate_present("game id", &input.game_id)?;
         validate_present("session title", &input.title)?;
