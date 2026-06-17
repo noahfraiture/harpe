@@ -269,5 +269,17 @@ mod tests {
         })
         .unwrap_err();
         assert!(matches!(invalid_llm_retries, HarpeError::Validation(_)));
+
+        let invalid_retry_base = AppConfig::from_vars(|key| match key {
+            "HARPE_LLM_PROVIDER" => Some("http".to_owned()),
+            "HARPE_LLM_BASE_URL" => Some("http://localhost".to_owned()),
+            "HARPE_LLM_CHAT_MODEL" => Some("chat".to_owned()),
+            "HARPE_LLM_EXTRACTION_MODEL" => Some("extract".to_owned()),
+            "HARPE_LLM_EMBEDDING_MODEL" => Some("embed".to_owned()),
+            "HARPE_LLM_RETRY_BASE_MS" => Some("soon".to_owned()),
+            _ => None,
+        })
+        .unwrap_err();
+        assert!(matches!(invalid_retry_base, HarpeError::Validation(_)));
     }
 }

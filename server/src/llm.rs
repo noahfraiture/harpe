@@ -874,6 +874,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn http_llm_sends_bearer_auth_when_api_key_is_configured() {
+        let mut mock = spawn_mock_http(vec![json_response(
+            r#"{"data":[{"embedding":[0.25,0.75]}]}"#,
+        )])
+        .await;
+        let llm = test_http_llm(&mock.base_url);
+
+        llm.embed("silver key").await.unwrap();
+
+        let request = mock.requests.recv().await.unwrap();
+        assert!(request.contains("authorization: Bearer test-key"));
+    }
+
+    #[tokio::test]
     async fn http_llm_reports_non_success_status() {
         let mut mock = spawn_mock_http(vec![http_response(
             "application/json",

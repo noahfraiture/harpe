@@ -1264,6 +1264,18 @@ mod tests {
             None
         );
         assert_eq!(
+            admin_job_status_filter(pb::AdminJobStatus::Pending as i32).unwrap(),
+            Some(JobStatus::Pending)
+        );
+        assert_eq!(
+            admin_job_status_filter(pb::AdminJobStatus::Running as i32).unwrap(),
+            Some(JobStatus::Running)
+        );
+        assert_eq!(
+            admin_job_status_filter(pb::AdminJobStatus::Succeeded as i32).unwrap(),
+            Some(JobStatus::Succeeded)
+        );
+        assert_eq!(
             admin_job_status_filter(pb::AdminJobStatus::Failed as i32).unwrap(),
             Some(JobStatus::Failed)
         );
@@ -1271,6 +1283,20 @@ mod tests {
             admin_job_status_filter(99),
             Err(HarpeError::Validation(_))
         ));
+    }
+
+    #[test]
+    fn admin_job_statuses_map_to_proto_values() {
+        let cases = [
+            (JobStatus::Pending, pb::AdminJobStatus::Pending),
+            (JobStatus::Running, pb::AdminJobStatus::Running),
+            (JobStatus::Succeeded, pb::AdminJobStatus::Succeeded),
+            (JobStatus::Failed, pb::AdminJobStatus::Failed),
+        ];
+
+        for (status, proto_status) in cases {
+            assert_eq!(admin_job_status_to_pb(status), proto_status as i32);
+        }
     }
 
     #[test]
