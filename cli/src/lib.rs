@@ -1,5 +1,5 @@
 use std::error::Error;
-use std::io::{self, Write};
+use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -19,6 +19,7 @@ use harpe_server::pb::{
     metrics_service_client::MetricsServiceClient, session_service_client::SessionServiceClient,
     user_service_client::UserServiceClient,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tonic::Request;
 use tonic::metadata::MetadataValue;
@@ -28,14 +29,28 @@ pub type CliResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
 const DEFAULT_ADDR: &str = "http://[::1]:50051";
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub addr: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+}
+
 #[derive(Parser, Debug, Clone, PartialEq)]
 #[command(name = "harpe")]
 #[command(about = "Command line client for the Harpe roleplay backend")]
 pub struct Cli {
-    #[arg(long, global = true, env = "HARPE_GRPC_ADDR", default_value = DEFAULT_ADDR)]
-    pub addr: String,
+    #[arg(long, global = true, env = "HARPE_GRPC_ADDR")]
+    pub addr: Option<String>,
     #[arg(long, global = true, env = "HARPE_USER_ID")]
     pub user_id: Option<String>,
+    #[arg(long, global = true, env = "HARPE_CONFIG")]
+    pub config: Option<PathBuf>,
     #[arg(long, global = true)]
     pub json: bool,
     #[command(subcommand)]
@@ -52,6 +67,49 @@ pub enum Command {
     Memory(MemoryArgs),
     Backup(BackupArgs),
     Admin(AdminArgs),
+    Config(ConfigArgs),
+    Play(PlayArgs),
+}
+
+#[derive(Args, Debug, Clone, PartialEq, Eq)]
+pub struct ConfigArgs {
+    #[command(subcommand)]
+    pub command: ConfigCommand,
+}
+
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
+pub enum ConfigCommand {
+    Show,
+    SetAddr {
+        addr: String,
+    },
+    SetUser {
+        user_id: String,
+    },
+    SetGame {
+        game_id: String,
+    },
+    SetSession {
+        session_id: String,
+    },
+    Clear {
+        #[arg(value_enum)]
+        key: ConfigKey,
+    },
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigKey {
+    Addr,
+    User,
+    Game,
+    Session,
+    All,
+}
+
+#[derive(Args, Debug, Clone, PartialEq, Eq)]
+pub struct PlayArgs {
+    pub session_id: Option<String>,
 }
 
 #[derive(Args, Debug, Clone, PartialEq, Eq)]
@@ -126,13 +184,13 @@ pub struct SessionArgs {
 pub enum SessionCommand {
     Create {
         #[arg(long)]
-        game: String,
+        game: Option<String>,
         #[arg(long)]
         title: String,
     },
     List {
         #[arg(long)]
-        game: String,
+        game: Option<String>,
         #[command(flatten)]
         page: PageArgs,
     },
@@ -169,7 +227,7 @@ pub enum MemoryCommand {
     },
     Characters {
         #[arg(long)]
-        game: String,
+        game: Option<String>,
         #[command(flatten)]
         page: PageArgs,
     },
@@ -183,13 +241,13 @@ pub enum MemoryCommand {
     },
     Facts {
         #[arg(long)]
-        game: String,
+        game: Option<String>,
         #[command(flatten)]
         page: PageArgs,
     },
     Locations {
         #[arg(long)]
-        game: String,
+        game: Option<String>,
         #[command(flatten)]
         page: PageArgs,
     },
@@ -212,13 +270,13 @@ pub struct BackupArgs {
 pub enum BackupCommand {
     Export {
         #[arg(long)]
-        game: String,
+        game: Option<String>,
         #[arg(long)]
         out: Option<PathBuf>,
     },
     Stream {
         #[arg(long)]
-        game: String,
+        game: Option<String>,
         #[arg(long)]
         out: Option<PathBuf>,
     },
@@ -280,23 +338,56 @@ impl PageArgs {
 }
 
 pub async fn run(cli: Cli) -> CliResult<()> {
+    let stdin = io::stdin();
     let stdout = io::stdout();
+    let stdin = stdin.lock();
     let mut stdout = stdout.lock();
-    execute(cli, &mut stdout).await
+    execute_with_io(cli, stdin, &mut stdout).await
 }
 
 pub async fn execute<W: Write>(cli: Cli, writer: &mut W) -> CliResult<()> {
-    let addr = normalize_addr(&cli.addr)?;
+    execute_with_io(cli, io::empty(), writer).await
+}
+
+pub async fn execute_with_io<R: BufRead, W: Write>(
+    cli: Cli,
+    reader: R,
+    writer: &mut W,
+) -> CliResult<()> {
+    let config_path = config_path(cli.config.as_deref())?;
+    let mut client_config = load_config_from_path(&config_path)?;
     let as_json = cli.json;
-    let owned_command_user_id = match &cli.command {
-        Command::Game(_) | Command::Session(_) | Command::Memory(_) | Command::Backup(_) => {
-            Some(required_user_id(cli.user_id.as_deref())?)
-        }
-        Command::Health(_) | Command::Metrics(_) | Command::User(_) | Command::Admin(_) => None,
+    let command = cli.command;
+
+    if let Command::Config(args) = &command {
+        return config(
+            args.clone(),
+            &config_path,
+            &mut client_config,
+            as_json,
+            writer,
+        );
+    }
+
+    let addr = resolve_addr(cli.addr.as_deref(), &client_config)?;
+    let owned_command_user_id = match &command {
+        Command::Game(_)
+        | Command::Session(_)
+        | Command::Memory(_)
+        | Command::Backup(_)
+        | Command::Play(_) => Some(required_user_id(resolve_user_id(
+            cli.user_id.as_deref(),
+            &client_config,
+        ))?),
+        Command::Health(_)
+        | Command::Metrics(_)
+        | Command::User(_)
+        | Command::Admin(_)
+        | Command::Config(_) => None,
     };
     let channel = Endpoint::from_shared(addr)?.connect().await?;
 
-    match cli.command {
+    match command {
         Command::Health(args) => health(channel, args, as_json, writer).await,
         Command::Metrics(args) => metrics(channel, args, as_json, writer).await,
         Command::User(args) => user(channel, args, as_json, writer).await,
@@ -315,6 +406,7 @@ pub async fn execute<W: Write>(cli: Cli, writer: &mut W) -> CliResult<()> {
                 channel,
                 args,
                 owned_command_user_id.expect("owned commands are validated before connect"),
+                &client_config,
                 as_json,
                 writer,
             )
@@ -325,6 +417,7 @@ pub async fn execute<W: Write>(cli: Cli, writer: &mut W) -> CliResult<()> {
                 channel,
                 args,
                 owned_command_user_id.expect("owned commands are validated before connect"),
+                &client_config,
                 as_json,
                 writer,
             )
@@ -335,13 +428,122 @@ pub async fn execute<W: Write>(cli: Cli, writer: &mut W) -> CliResult<()> {
                 channel,
                 args,
                 owned_command_user_id.expect("owned commands are validated before connect"),
+                &client_config,
                 as_json,
                 writer,
             )
             .await
         }
         Command::Admin(args) => admin(channel, args, as_json, writer).await,
+        Command::Config(_) => unreachable!("config commands return before connecting"),
+        Command::Play(args) => {
+            play(
+                channel,
+                args,
+                owned_command_user_id.expect("owned commands are validated before connect"),
+                &client_config,
+                as_json,
+                reader,
+                writer,
+            )
+            .await
+        }
     }
+}
+
+fn config<W: Write>(
+    args: ConfigArgs,
+    config_path: &Path,
+    client_config: &mut ClientConfig,
+    as_json: bool,
+    writer: &mut W,
+) -> CliResult<()> {
+    match args.command {
+        ConfigCommand::Show => {
+            let value = config_json(client_config, config_path);
+            if as_json {
+                write_json(writer, &value)
+            } else {
+                writeln!(writer, "path={}", config_path.display())?;
+                writeln!(
+                    writer,
+                    "addr={}",
+                    client_config.addr.as_deref().unwrap_or(DEFAULT_ADDR)
+                )?;
+                writeln!(
+                    writer,
+                    "user_id={}",
+                    client_config.user_id.as_deref().unwrap_or("")
+                )?;
+                writeln!(
+                    writer,
+                    "game_id={}",
+                    client_config.game_id.as_deref().unwrap_or("")
+                )?;
+                writeln!(
+                    writer,
+                    "session_id={}",
+                    client_config.session_id.as_deref().unwrap_or("")
+                )?;
+                Ok(())
+            }
+        }
+        ConfigCommand::SetAddr { addr } => {
+            client_config.addr = Some(normalize_addr(&addr)?);
+            save_config_to_path(config_path, client_config)?;
+            write_config_update(writer, as_json, config_path, client_config)
+        }
+        ConfigCommand::SetUser { user_id } => {
+            client_config.user_id = Some(required_value("user id", &user_id)?);
+            save_config_to_path(config_path, client_config)?;
+            write_config_update(writer, as_json, config_path, client_config)
+        }
+        ConfigCommand::SetGame { game_id } => {
+            client_config.game_id = Some(required_value("game id", &game_id)?);
+            save_config_to_path(config_path, client_config)?;
+            write_config_update(writer, as_json, config_path, client_config)
+        }
+        ConfigCommand::SetSession { session_id } => {
+            client_config.session_id = Some(required_value("session id", &session_id)?);
+            save_config_to_path(config_path, client_config)?;
+            write_config_update(writer, as_json, config_path, client_config)
+        }
+        ConfigCommand::Clear { key } => {
+            match key {
+                ConfigKey::Addr => client_config.addr = None,
+                ConfigKey::User => client_config.user_id = None,
+                ConfigKey::Game => client_config.game_id = None,
+                ConfigKey::Session => client_config.session_id = None,
+                ConfigKey::All => *client_config = ClientConfig::default(),
+            }
+            save_config_to_path(config_path, client_config)?;
+            write_config_update(writer, as_json, config_path, client_config)
+        }
+    }
+}
+
+fn write_config_update<W: Write>(
+    writer: &mut W,
+    as_json: bool,
+    config_path: &Path,
+    client_config: &ClientConfig,
+) -> CliResult<()> {
+    if as_json {
+        write_json(writer, &config_json(client_config, config_path))
+    } else {
+        writeln!(writer, "config_path={}", config_path.display())?;
+        Ok(())
+    }
+}
+
+fn config_json(client_config: &ClientConfig, config_path: &Path) -> Value {
+    json!({
+        "path": config_path.display().to_string(),
+        "addr": client_config.addr,
+        "user_id": client_config.user_id,
+        "game_id": client_config.game_id,
+        "session_id": client_config.session_id,
+    })
 }
 
 async fn health<W: Write>(
@@ -519,12 +721,15 @@ async fn session<W: Write>(
     channel: Channel,
     args: SessionArgs,
     user_id: String,
+    config: &ClientConfig,
     as_json: bool,
     writer: &mut W,
 ) -> CliResult<()> {
     let mut client = SessionServiceClient::new(channel);
     match args.command {
         SessionCommand::Create { game, title } => {
+            let game =
+                required_config_value("game id", game.as_deref().or(config.game_id.as_deref()))?;
             let response = client
                 .create_session(with_user(
                     CreateSessionRequest {
@@ -538,6 +743,8 @@ async fn session<W: Write>(
             write_session(writer, as_json, &response)
         }
         SessionCommand::List { game, page } => {
+            let game =
+                required_config_value("game id", game.as_deref().or(config.game_id.as_deref()))?;
             let response = client
                 .list_sessions(with_user(
                     ListSessionsRequest {
@@ -707,10 +914,228 @@ async fn send_message<W: Write>(
     }
 }
 
+async fn play<R: BufRead, W: Write>(
+    channel: Channel,
+    args: PlayArgs,
+    user_id: String,
+    config: &ClientConfig,
+    as_json: bool,
+    mut reader: R,
+    writer: &mut W,
+) -> CliResult<()> {
+    if as_json {
+        return Err(invalid_input("--json is not supported with play"));
+    }
+
+    let session_id = required_config_value(
+        "session id",
+        args.session_id.as_deref().or(config.session_id.as_deref()),
+    )?;
+    let session = SessionServiceClient::new(channel.clone())
+        .get_session(with_user(
+            GetSessionRequest {
+                session_id: session_id.clone(),
+            },
+            &user_id,
+        )?)
+        .await?
+        .into_inner();
+
+    writeln!(
+        writer,
+        "session={} title={} game={}",
+        session.id, session.title, session.game_id
+    )?;
+    write_play_help(writer)?;
+
+    let mut line = String::new();
+    loop {
+        write!(writer, "> ")?;
+        writer.flush()?;
+        line.clear();
+        if reader.read_line(&mut line)? == 0 {
+            break;
+        }
+
+        let input = line.trim();
+        if input.is_empty() {
+            continue;
+        }
+
+        match handle_play_input(
+            channel.clone(),
+            &session.id,
+            &session.game_id,
+            &user_id,
+            input,
+            writer,
+        )
+        .await
+        {
+            Ok(true) => {}
+            Ok(false) => break,
+            Err(error) => writeln!(writer, "error: {error}")?,
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_play_input<W: Write>(
+    channel: Channel,
+    session_id: &str,
+    game_id: &str,
+    user_id: &str,
+    input: &str,
+    writer: &mut W,
+) -> CliResult<bool> {
+    match input {
+        "/quit" | "/exit" => return Ok(false),
+        "/help" => {
+            write_play_help(writer)?;
+            return Ok(true);
+        }
+        "/summary" => {
+            let summary = MemoryServiceClient::new(channel)
+                .get_story_summary(with_user(
+                    GetStorySummaryRequest {
+                        session_id: session_id.to_owned(),
+                    },
+                    user_id,
+                )?)
+                .await?
+                .into_inner();
+            writeln!(writer, "updated_at={}", summary.updated_at)?;
+            writeln!(writer, "{}", summary.content)?;
+            return Ok(true);
+        }
+        "/characters" => {
+            let characters = MemoryServiceClient::new(channel)
+                .list_characters(with_user(
+                    ListCharactersRequest {
+                        game_id: game_id.to_owned(),
+                        limit: 20,
+                        page: None,
+                    },
+                    user_id,
+                )?)
+                .await?
+                .into_inner()
+                .characters;
+            for character in characters {
+                writeln!(
+                    writer,
+                    "{}\t{}\tstatus={}\t{}",
+                    character.id, character.name, character.status, character.description
+                )?;
+            }
+            return Ok(true);
+        }
+        "/events" => {
+            let events = MemoryServiceClient::new(channel)
+                .list_events(with_user(
+                    ListEventsRequest {
+                        session_id: session_id.to_owned(),
+                        limit: 20,
+                        page: None,
+                    },
+                    user_id,
+                )?)
+                .await?
+                .into_inner()
+                .events;
+            for event in events {
+                writeln!(
+                    writer,
+                    "{}\timportance={}\t{}\t{}",
+                    event.id, event.importance, event.created_at, event.summary
+                )?;
+            }
+            return Ok(true);
+        }
+        _ => {}
+    }
+
+    if let Some(content) = input.strip_prefix("/context ") {
+        let content = required_value("context content", content)?;
+        let response = SessionServiceClient::new(channel)
+            .preview_context(with_user(
+                PreviewContextRequest {
+                    session_id: session_id.to_owned(),
+                    content,
+                },
+                user_id,
+            )?)
+            .await?
+            .into_inner();
+        writeln!(writer, "estimated_tokens={}", response.estimated_tokens)?;
+        for message in response.messages {
+            writeln!(
+                writer,
+                "{} [{} tokens]\n{}",
+                role_name(message.role),
+                message.estimated_tokens,
+                message.content
+            )?;
+        }
+        return Ok(true);
+    }
+
+    if let Some(query) = input.strip_prefix("/memory ") {
+        let query = required_value("memory query", query)?;
+        let hits = MemoryServiceClient::new(channel)
+            .search_memory(with_user(
+                SearchMemoryRequest {
+                    session_id: session_id.to_owned(),
+                    query,
+                    limit: 10,
+                    page: None,
+                },
+                user_id,
+            )?)
+            .await?
+            .into_inner()
+            .hits;
+        for hit in hits {
+            writeln!(
+                writer,
+                "{}\tscore={:.4}\tkind={}\t{}",
+                hit.id, hit.score, hit.kind, hit.content
+            )?;
+        }
+        return Ok(true);
+    }
+
+    if input.starts_with('/') {
+        writeln!(writer, "unknown command: {input}")?;
+        return Ok(true);
+    }
+
+    send_message(
+        SessionServiceClient::new(channel),
+        session_id.to_owned(),
+        input.to_owned(),
+        user_id.to_owned(),
+        false,
+        writer,
+    )
+    .await?;
+    Ok(true)
+}
+
+fn write_play_help<W: Write>(writer: &mut W) -> CliResult<()> {
+    writeln!(
+        writer,
+        "commands: /context <message>, /summary, /characters, /events, /memory <query>, /help, /quit"
+    )?;
+    Ok(())
+}
+
 async fn memory<W: Write>(
     channel: Channel,
     args: MemoryArgs,
     user_id: String,
+    config: &ClientConfig,
     as_json: bool,
     writer: &mut W,
 ) -> CliResult<()> {
@@ -730,6 +1155,8 @@ async fn memory<W: Write>(
             }
         }
         MemoryCommand::Characters { game, page } => {
+            let game =
+                required_config_value("game id", game.as_deref().or(config.game_id.as_deref()))?;
             let response = client
                 .list_characters(with_user(
                     ListCharactersRequest {
@@ -808,6 +1235,8 @@ async fn memory<W: Write>(
             }
         }
         MemoryCommand::Facts { game, page } => {
+            let game =
+                required_config_value("game id", game.as_deref().or(config.game_id.as_deref()))?;
             let response = client
                 .list_world_facts(with_user(
                     ListWorldFactsRequest {
@@ -839,6 +1268,8 @@ async fn memory<W: Write>(
             }
         }
         MemoryCommand::Locations { game, page } => {
+            let game =
+                required_config_value("game id", game.as_deref().or(config.game_id.as_deref()))?;
             let response = client
                 .list_locations(with_user(
                     ListLocationsRequest {
@@ -912,12 +1343,15 @@ async fn backup<W: Write>(
     channel: Channel,
     args: BackupArgs,
     user_id: String,
+    config: &ClientConfig,
     as_json: bool,
     writer: &mut W,
 ) -> CliResult<()> {
     let mut client = MemoryServiceClient::new(channel);
     match args.command {
         BackupCommand::Export { game, out } => {
+            let game =
+                required_config_value("game id", game.as_deref().or(config.game_id.as_deref()))?;
             let response = client
                 .export_game(with_user(ExportGameRequest { game_id: game }, &user_id)?)
                 .await?
@@ -934,6 +1368,8 @@ async fn backup<W: Write>(
             }
         }
         BackupCommand::Stream { game, out } => {
+            let game =
+                required_config_value("game id", game.as_deref().or(config.game_id.as_deref()))?;
             let mut stream = client
                 .export_game_stream(with_user(ExportGameRequest { game_id: game }, &user_id)?)
                 .await?
@@ -1152,12 +1588,80 @@ fn with_user<T>(message: T, user_id: &str) -> CliResult<Request<T>> {
     Ok(request)
 }
 
+fn config_path(explicit_path: Option<&Path>) -> CliResult<PathBuf> {
+    if let Some(path) = explicit_path {
+        return Ok(path.to_path_buf());
+    }
+
+    if let Some(config_home) = std::env::var_os("XDG_CONFIG_HOME") {
+        return Ok(PathBuf::from(config_home).join("harpe").join("config.json"));
+    }
+
+    if let Some(home) = std::env::var_os("HOME") {
+        return Ok(PathBuf::from(home)
+            .join(".config")
+            .join("harpe")
+            .join("config.json"));
+    }
+
+    Err(invalid_input(
+        "cannot resolve config path; set --config or HOME",
+    ))
+}
+
+fn load_config_from_path(path: &Path) -> CliResult<ClientConfig> {
+    if !path.exists() {
+        return Ok(ClientConfig::default());
+    }
+
+    let content = std::fs::read_to_string(path)?;
+    if content.trim().is_empty() {
+        return Ok(ClientConfig::default());
+    }
+
+    Ok(serde_json::from_str(&content)?)
+}
+
+fn save_config_to_path(path: &Path, config: &ClientConfig) -> CliResult<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, format!("{}\n", serde_json::to_string_pretty(config)?))?;
+    Ok(())
+}
+
+fn resolve_addr(cli_addr: Option<&str>, config: &ClientConfig) -> CliResult<String> {
+    normalize_addr(cli_addr.or(config.addr.as_deref()).unwrap_or(DEFAULT_ADDR))
+}
+
+fn resolve_user_id<'a>(cli_user_id: Option<&'a str>, config: &'a ClientConfig) -> Option<&'a str> {
+    cli_user_id.or(config.user_id.as_deref())
+}
+
 fn required_user_id(user_id: Option<&str>) -> CliResult<String> {
     user_id
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
         .ok_or_else(|| invalid_input("set --user-id or HARPE_USER_ID for this command"))
+}
+
+fn required_value(name: &str, value: &str) -> CliResult<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(invalid_input(format!("{name} is required")));
+    }
+    Ok(value.to_owned())
+}
+
+fn required_config_value(name: &str, value: Option<&str>) -> CliResult<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| invalid_input(format!("set {name} in config or pass it explicitly")))
 }
 
 pub fn normalize_addr(addr: &str) -> CliResult<String> {
@@ -1483,7 +1987,7 @@ mod tests {
             "gate",
         ]);
 
-        assert_eq!(cli.addr, "127.0.0.1:50051");
+        assert_eq!(cli.addr.as_deref(), Some("127.0.0.1:50051"));
         assert_eq!(cli.user_id.as_deref(), Some("user-1"));
         assert!(cli.json);
         assert_eq!(
@@ -1551,6 +2055,42 @@ mod tests {
 
         assert_eq!(page.limit, 3);
         assert_eq!(page.page_token.as_deref(), Some("cursor-1"));
+    }
+
+    #[test]
+    fn parses_config_commands() {
+        let cli = Cli::parse_from(["harpe", "config", "set-session", "session-1"]);
+
+        assert_eq!(
+            cli.command,
+            Command::Config(ConfigArgs {
+                command: ConfigCommand::SetSession {
+                    session_id: "session-1".to_owned(),
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn client_config_round_trips_and_resolves_defaults() {
+        let path = temp_test_path("client-config.json");
+        let config = ClientConfig {
+            addr: Some("http://127.0.0.1:50051".to_owned()),
+            user_id: Some("user-1".to_owned()),
+            game_id: Some("game-1".to_owned()),
+            session_id: Some("session-1".to_owned()),
+        };
+
+        save_config_to_path(&path, &config).unwrap();
+        let loaded = load_config_from_path(&path).unwrap();
+
+        assert_eq!(loaded, config);
+        assert_eq!(
+            resolve_addr(None, &loaded).unwrap(),
+            "http://127.0.0.1:50051"
+        );
+        assert_eq!(resolve_user_id(None, &loaded), Some("user-1"));
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -1635,5 +2175,9 @@ mod tests {
         };
 
         assert_eq!(message_json(&message)["role"], "user");
+    }
+
+    fn temp_test_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("harpe-cli-unit-{}-{name}", std::process::id()))
     }
 }

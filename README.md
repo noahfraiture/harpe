@@ -18,6 +18,17 @@ The current milestone is a Rust gRPC server with:
 - a Rust CLI client for health checks, users, games, sessions, memory search/views, metrics, backups, and admin debugging
 - unit tests plus integration tests covering embedded SurrealDB, migration idempotence, graph edges, and a real gRPC client/server path
 
+## Architecture
+
+Harpe is split into a backend service and thin clients:
+
+- `server/proto/harpe/v1/harpe.proto` defines the gRPC API shared by all clients.
+- `harpe-server` hosts the gRPC services, validates ownership through `x-user-id` metadata, builds model context, streams assistant responses, and schedules background memory updates after turns.
+- SurrealDB stores users, games, sessions, messages, summaries, characters, events, world facts, locations, graph edges, memory chunks, background jobs, and backup snapshots.
+- The LLM layer has a deterministic echo implementation for development/tests and an OpenAI-compatible HTTP adapter for real providers.
+- Background jobs update durable memory after assistant turns, with retry/backoff and admin/debug RPCs for failed jobs and raw memory chunks.
+- `harpe-cli` is the first client. Future TUI, macOS, and iOS clients should use the same gRPC API and can copy the CLI workflows: create/select user, game, and session, stream `SendMessage`, and fetch memory/context views as needed.
+
 ## Run
 
 ```sh
@@ -67,35 +78,55 @@ cargo run -p harpe-cli -- health
 
 Defaults:
 
-- `HARPE_GRPC_ADDR=http://[::1]:50051`; bare addresses such as `[::1]:50051` are also accepted
-- `HARPE_USER_ID` can be used instead of passing `--user-id`
+- address resolution is `--addr`, then `HARPE_GRPC_ADDR`, then client config, then `http://[::1]:50051`; bare addresses such as `[::1]:50051` are also accepted
+- user resolution is `--user-id`, then `HARPE_USER_ID`, then client config
+- client config defaults to `$XDG_CONFIG_HOME/harpe/config.json` or `$HOME/.config/harpe/config.json`; override with `--config`
 - `--json` switches command output to structured JSON where the command returns a single response
 
 Basic flow:
 
 ```sh
 USER_ID=$(cargo run -q -p harpe-cli -- --json user create --name "Noah" | jq -r .id)
-GAME_ID=$(HARPE_USER_ID=$USER_ID cargo run -q -p harpe-cli -- --json game create \
+cargo run -q -p harpe-cli -- config set-user "$USER_ID"
+
+GAME_ID=$(cargo run -q -p harpe-cli -- --json game create \
   --title "Iron Coast" \
   --system-prompt "Run a tense coastal fantasy adventure." | jq -r .id)
-SESSION_ID=$(HARPE_USER_ID=$USER_ID cargo run -q -p harpe-cli -- --json session create \
+cargo run -q -p harpe-cli -- config set-game "$GAME_ID"
+
+SESSION_ID=$(cargo run -q -p harpe-cli -- --json session create \
   --game "$GAME_ID" \
   --title "First watch" | jq -r .id)
+cargo run -q -p harpe-cli -- config set-session "$SESSION_ID"
 
-HARPE_USER_ID=$USER_ID cargo run -q -p harpe-cli -- session send "$SESSION_ID" "I inspect the sea gate."
+cargo run -q -p harpe-cli -- play
 ```
 
 Useful read commands:
 
 ```sh
-HARPE_USER_ID=$USER_ID cargo run -q -p harpe-cli -- game list
-HARPE_USER_ID=$USER_ID cargo run -q -p harpe-cli -- session messages "$SESSION_ID"
-HARPE_USER_ID=$USER_ID cargo run -q -p harpe-cli -- session context "$SESSION_ID" "I inspect the sea gate."
-HARPE_USER_ID=$USER_ID cargo run -q -p harpe-cli -- memory search "$SESSION_ID" "sea gate"
-HARPE_USER_ID=$USER_ID cargo run -q -p harpe-cli -- backup stream --game "$GAME_ID" > harpe-backup.ndjson
+cargo run -q -p harpe-cli -- config show
+cargo run -q -p harpe-cli -- game list
+cargo run -q -p harpe-cli -- session messages "$SESSION_ID"
+cargo run -q -p harpe-cli -- session context "$SESSION_ID" "I inspect the sea gate."
+cargo run -q -p harpe-cli -- memory search "$SESSION_ID" "sea gate"
+cargo run -q -p harpe-cli -- backup stream --game "$GAME_ID" > harpe-backup.ndjson
 cargo run -q -p harpe-cli -- metrics export
 cargo run -q -p harpe-cli -- admin jobs --status failed
 ```
+
+Inside `harpe play`, enter normal player messages or slash commands:
+
+```text
+/context I inspect the sea gate
+/summary
+/characters
+/events
+/memory sea gate
+/quit
+```
+
+See [cli/README.md](cli/README.md) for focused CLI usage.
 
 ## Test
 

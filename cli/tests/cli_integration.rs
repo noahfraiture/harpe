@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use clap::Parser;
-use harpe_cli::{Cli, CliResult, execute};
+use harpe_cli::{Cli, CliResult, execute, execute_with_io};
 use harpe_server::api::grpc::HarpeGrpc;
 use harpe_server::db::surreal::SurrealStore;
 use harpe_server::domain::{
@@ -26,6 +26,8 @@ use uuid::Uuid;
 
 #[tokio::test]
 async fn cli_drives_core_roleplay_flow_against_real_grpc_server() {
+    let config_path = integration_config_path();
+    let _ = std::fs::remove_file(&config_path);
     let store = Arc::new(test_store().await);
     let llm = Arc::new(
         EchoLlm::new(vec!["The gate ".to_owned(), "opens.".to_owned()]).with_extraction(
@@ -149,6 +151,23 @@ async fn cli_drives_core_roleplay_flow_against_real_grpc_server() {
 
     let fetched_session = run_json(&addr, Some(&user_id), &["session", "get", &session_id]).await;
     assert_eq!(fetched_session["id"], session_id);
+
+    let config_user = run_json(&addr, None, &["config", "set-user", &user_id]).await;
+    assert_eq!(config_user["user_id"], user_id);
+    let config_game = run_json(&addr, None, &["config", "set-game", &game_id]).await;
+    assert_eq!(config_game["game_id"], game_id);
+    let config_session = run_json(&addr, None, &["config", "set-session", &session_id]).await;
+    assert_eq!(config_session["session_id"], session_id);
+    let config_show = run_json(&addr, None, &["config", "show"]).await;
+    assert_eq!(config_show["user_id"], user_id);
+    assert_eq!(config_show["game_id"], game_id);
+    assert_eq!(config_show["session_id"], session_id);
+
+    let sessions_from_config = run_json(&addr, None, &["session", "list", "--limit", "10"]).await;
+    assert_eq!(
+        sessions_from_config["sessions"].as_array().unwrap().len(),
+        1
+    );
 
     let context = run_json(
         &addr,
@@ -283,6 +302,16 @@ async fn cli_drives_core_roleplay_flow_against_real_grpc_server() {
     assert_eq!(locations["locations"].as_array().unwrap().len(), 1);
     assert_eq!(locations["locations"][0]["name"], "Iron Coast harbor");
 
+    let characters_from_config =
+        run_json(&addr, None, &["memory", "characters", "--limit", "10"]).await;
+    assert_eq!(
+        characters_from_config["characters"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
     let hits = run_json(
         &addr,
         Some(&user_id),
@@ -362,6 +391,19 @@ async fn cli_drives_core_roleplay_flow_against_real_grpc_server() {
     let metrics_export = run_text(&addr, None, &["metrics", "export"]).await;
     assert!(metrics_export.contains("harpe_grpc_requests_total"));
 
+    let play_output = run_text_with_input(
+        &addr,
+        None,
+        &["play"],
+        b"/summary\n/characters\n/events\n/memory sea gate\n/context I listen\nI wait again\n/unknown\n/quit\n",
+    )
+    .await;
+    assert!(play_output.contains("commands: /context"));
+    assert!(play_output.contains("The gate opens."));
+    assert!(play_output.contains("Mira"));
+    assert!(play_output.contains("estimated_tokens="));
+    assert!(play_output.contains("unknown command: /unknown"));
+
     let metrics_path = temp_path("metrics.prom");
     let metrics_path_str = metrics_path.to_str().unwrap();
     let metrics_file = run_json(
@@ -436,6 +478,10 @@ async fn cli_drives_core_roleplay_flow_against_real_grpc_server() {
         .unwrap_err();
     assert_error_contains(validation_error.as_ref(), "invalid");
 
+    let config_clear = run_json(&addr, None, &["config", "clear", "session"]).await;
+    assert_eq!(config_clear["session_id"], Value::Null);
+    std::fs::remove_file(config_path).unwrap();
+
     server.abort();
 }
 
@@ -445,11 +491,32 @@ async fn run_json(addr: &str, user_id: Option<&str>, args: &[&str]) -> Value {
 }
 
 async fn run_text(addr: &str, user_id: Option<&str>, args: &[&str]) -> String {
-    String::from_utf8(run_cli(addr, user_id, false, args).await).unwrap()
+    run_text_with_input(addr, user_id, args, &[]).await
+}
+
+async fn run_text_with_input(
+    addr: &str,
+    user_id: Option<&str>,
+    args: &[&str],
+    input: &[u8],
+) -> String {
+    String::from_utf8(run_cli_with_input(addr, user_id, false, args, input).await).unwrap()
 }
 
 async fn run_cli(addr: &str, user_id: Option<&str>, as_json: bool, args: &[&str]) -> Vec<u8> {
-    run_cli_result(addr, user_id, as_json, args).await.unwrap()
+    run_cli_with_input(addr, user_id, as_json, args, &[]).await
+}
+
+async fn run_cli_with_input(
+    addr: &str,
+    user_id: Option<&str>,
+    as_json: bool,
+    args: &[&str],
+    input: &[u8],
+) -> Vec<u8> {
+    run_cli_result_with_input(addr, user_id, as_json, args, input)
+        .await
+        .unwrap()
 }
 
 async fn run_cli_result(
@@ -458,7 +525,19 @@ async fn run_cli_result(
     as_json: bool,
     args: &[&str],
 ) -> CliResult<Vec<u8>> {
+    run_cli_result_with_input(addr, user_id, as_json, args, &[]).await
+}
+
+async fn run_cli_result_with_input(
+    addr: &str,
+    user_id: Option<&str>,
+    as_json: bool,
+    args: &[&str],
+    input: &[u8],
+) -> CliResult<Vec<u8>> {
     let mut argv = vec!["harpe".to_owned(), "--addr".to_owned(), addr.to_owned()];
+    argv.push("--config".to_owned());
+    argv.push(integration_config_path().display().to_string());
     if as_json {
         argv.push("--json".to_owned());
     }
@@ -470,7 +549,11 @@ async fn run_cli_result(
 
     let cli = Cli::parse_from(argv);
     let mut output = Vec::new();
-    execute(cli, &mut output).await?;
+    if input.is_empty() {
+        execute(cli, &mut output).await?;
+    } else {
+        execute_with_io(cli, std::io::Cursor::new(input), &mut output).await?;
+    }
 
     Ok(output)
 }
@@ -483,6 +566,10 @@ async fn test_store() -> SurrealStore {
 
 fn temp_path(name: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("harpe-cli-{}-{name}", Uuid::now_v7()))
+}
+
+fn integration_config_path() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("harpe-cli-integration-{}.json", std::process::id()))
 }
 
 fn assert_error_contains(error: &(dyn std::error::Error + Send + Sync), expected: &str) {
