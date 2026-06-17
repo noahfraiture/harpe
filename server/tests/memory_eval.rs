@@ -15,9 +15,23 @@ use tokio_stream::iter;
 use uuid::Uuid;
 
 #[tokio::test]
-async fn harbor_transcript_preserves_expected_story_memory() {
-    let fixture: MemoryEvalFixture =
-        serde_json::from_str(include_str!("fixtures/harbor_memory_eval.json")).unwrap();
+async fn scripted_transcripts_preserve_expected_story_memory() {
+    for (name, json) in [
+        ("harbor", include_str!("fixtures/harbor_memory_eval.json")),
+        ("social", include_str!("fixtures/social_memory_eval.json")),
+        ("combat", include_str!("fixtures/combat_memory_eval.json")),
+        (
+            "inventory",
+            include_str!("fixtures/inventory_memory_eval.json"),
+        ),
+        ("travel", include_str!("fixtures/travel_memory_eval.json")),
+    ] {
+        let fixture: MemoryEvalFixture = serde_json::from_str(json).unwrap();
+        run_memory_eval(name, fixture).await;
+    }
+}
+
+async fn run_memory_eval(name: &str, fixture: MemoryEvalFixture) {
     let store = test_store().await;
     let user = store
         .create_user(NewUser {
@@ -36,7 +50,7 @@ async fn harbor_transcript_preserves_expected_story_memory() {
     let session = store
         .create_session(NewSession {
             game_id: game.id.clone(),
-            title: "Harbor memory eval".to_owned(),
+            title: format!("{name} memory eval"),
         })
         .await
         .unwrap();
@@ -71,17 +85,17 @@ async fn harbor_transcript_preserves_expected_story_memory() {
     for expected in &fixture.expected.summary_contains {
         assert!(
             summary.content.contains(expected),
-            "summary did not contain {expected:?}: {}",
+            "{name} summary did not contain {expected:?}: {}",
             summary.content
         );
     }
 
     let characters = store.list_characters(&game.id).await.unwrap();
-    for (name, status) in &fixture.expected.character_status {
+    for (character_name, status) in &fixture.expected.character_status {
         let character = characters
             .iter()
-            .find(|character| character.name == *name)
-            .unwrap_or_else(|| panic!("missing character {name}"));
+            .find(|character| character.name == *character_name)
+            .unwrap_or_else(|| panic!("{name}: missing character {character_name}"));
         assert_eq!(&character.status, status);
     }
 
@@ -93,7 +107,7 @@ async fn harbor_transcript_preserves_expected_story_memory() {
     for expected in &fixture.expected.event_summaries {
         assert!(
             event_summaries.contains(&expected.as_str()),
-            "missing event {expected:?}; got {event_summaries:?}"
+            "{name}: missing event {expected:?}; got {event_summaries:?}"
         );
     }
 
@@ -105,7 +119,7 @@ async fn harbor_transcript_preserves_expected_story_memory() {
     for expected in &fixture.expected.world_fact_contents {
         assert!(
             fact_contents.contains(&expected.as_str()),
-            "missing world fact {expected:?}; got {fact_contents:?}"
+            "{name}: missing world fact {expected:?}; got {fact_contents:?}"
         );
     }
 
@@ -117,7 +131,7 @@ async fn harbor_transcript_preserves_expected_story_memory() {
     for expected in &fixture.expected.locations {
         assert!(
             location_names.contains(&expected.as_str()),
-            "missing location {expected:?}; got {location_names:?}"
+            "{name}: missing location {expected:?}; got {location_names:?}"
         );
     }
 
@@ -142,7 +156,7 @@ async fn harbor_transcript_preserves_expected_story_memory() {
             .chunk
             .content
             .contains(&fixture.expected.search_result_contains)),
-        "search hits did not include expected memory: {hits:?}"
+        "{name}: search hits did not include expected memory: {hits:?}"
     );
 }
 

@@ -1,0 +1,100 @@
+{
+  "game_title": "Red Dunes",
+  "system_prompt": "Run a wilderness journey where route choices and fatigue persist.",
+  "turns": [
+    {
+      "user": "We cross the Red Dunes before noon and ask Ilya to mark the safe wells.",
+      "assistant": "Ilya marks three safe wells across the Red Dunes, but the noon heat exhausts her. She warns that the route should be traveled at dawn from now on.",
+      "summary": "The party crossed the Red Dunes before noon. Ilya marked three safe wells, became exhausted by the heat, and warned that the route should be traveled at dawn.",
+      "extraction": {
+        "events": [
+          {
+            "summary": "Ilya marked three safe wells across the Red Dunes.",
+            "importance": 4
+          }
+        ],
+        "character_updates": [
+          {
+            "name": "Ilya",
+            "description": "A desert guide mapping safe wells across the Red Dunes.",
+            "status": "exhausted but loyal"
+          }
+        ],
+        "world_facts": [
+          {
+            "subject": "Red Dunes route",
+            "predicate": "should be traveled at",
+            "object": "dawn",
+            "content": "The Red Dunes route should be traveled at dawn.",
+            "confidence": 0.9
+          }
+        ],
+        "locations": [
+          {
+            "name": "Red Dunes",
+            "description": "A hot desert route with three safe wells marked by Ilya."
+          }
+        ]
+      }
+    },
+    {
+      "user": "At dawn we follow Ilya's wells to the black obelisk.",
+      "assistant": "Traveling at dawn keeps the party safe. Ilya recovers enough to lead them to the black obelisk at the far edge of the Red Dunes.",
+      "summary": "The party crossed the Red Dunes, learned to travel the route at dawn, followed Ilya's three marked wells, and reached the black obelisk while Ilya recovered enough to guide them.",
+      "extraction": {
+        "events": [
+          {
+            "summary": "The party reached the black obelisk by following Ilya's wells at dawn.",
+            "importance": 5
+          }
+        ],
+        "character_updates": [
+          {
+            "name": "Ilya",
+            "description": "A desert guide who led the party through the Red Dunes.",
+            "status": "recovering and loyal"
+          }
+        ],
+        "world_facts": [
+          {
+            "subject": "black obelisk",
+            "predicate": "stands at",
+            "object": "far edge of the Red Dunes",
+            "content": "The black obelisk stands at the far edge of the Red Dunes.",
+            "confidence": 0.95
+          }
+        ],
+        "locations": [
+          {
+            "name": "Black Obelisk",
+            "description": "A landmark at the far edge of the Red Dunes."
+          }
+        ]
+      }
+    }
+  ],
+  "expected": {
+    "summary_contains": [
+      "learned to travel the route at dawn",
+      "three marked wells",
+      "reached the black obelisk"
+    ],
+    "character_status": {
+      "Ilya": "recovering and loyal"
+    },
+    "event_summaries": [
+      "Ilya marked three safe wells across the Red Dunes.",
+      "The party reached the black obelisk by following Ilya's wells at dawn."
+    ],
+    "world_fact_contents": [
+      "The Red Dunes route should be traveled at dawn.",
+      "The black obelisk stands at the far edge of the Red Dunes."
+    ],
+    "locations": [
+      "Red Dunes",
+      "Black Obelisk"
+    ],
+    "search_query": "Red Dunes dawn travel",
+    "search_result_contains": "Red Dunes route should be traveled at dawn"
+  }
+}

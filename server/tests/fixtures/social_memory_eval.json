@@ -1,0 +1,61 @@
+{
+  "game_title": "Moon Court",
+  "system_prompt": "Run a courtly intrigue game where favors and secrets matter.",
+  "turns": [
+    {
+      "user": "I ask Elian why the duchess hid the sapphire seal.",
+      "assistant": "Elian admits the sapphire seal was forged by House Vey. He is embarrassed, but he promises the party a favor if they keep the confession quiet.",
+      "summary": "At the Moon Court, Elian admitted the sapphire seal was forged by House Vey and promised the party a favor for their discretion.",
+      "extraction": {
+        "events": [
+          {
+            "summary": "Elian admitted the sapphire seal was forged by House Vey.",
+            "importance": 5
+          }
+        ],
+        "character_updates": [
+          {
+            "name": "Elian",
+            "description": "A courtier caught between House Vey and the duchess.",
+            "status": "owes the party a favor"
+          }
+        ],
+        "world_facts": [
+          {
+            "subject": "sapphire seal",
+            "predicate": "was forged by",
+            "object": "House Vey",
+            "content": "The sapphire seal was forged by House Vey.",
+            "confidence": 0.95
+          }
+        ],
+        "locations": [
+          {
+            "name": "Moonlit Gallery",
+            "description": "A quiet gallery in the Moon Court where Elian confessed."
+          }
+        ]
+      }
+    }
+  ],
+  "expected": {
+    "summary_contains": [
+      "sapphire seal was forged",
+      "promised the party a favor"
+    ],
+    "character_status": {
+      "Elian": "owes the party a favor"
+    },
+    "event_summaries": [
+      "Elian admitted the sapphire seal was forged by House Vey."
+    ],
+    "world_fact_contents": [
+      "The sapphire seal was forged by House Vey."
+    ],
+    "locations": [
+      "Moonlit Gallery"
+    ],
+    "search_query": "sapphire forged seal",
+    "search_result_contains": "sapphire seal was forged"
+  }
+}

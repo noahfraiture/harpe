@@ -1,0 +1,75 @@
+{
+  "game_title": "Glass Market",
+  "system_prompt": "Run an exploration game where inventory and resources remain consistent.",
+  "turns": [
+    {
+      "user": "I buy the star compass from Tamsin and spend one moonstone charge to test it.",
+      "assistant": "Tamsin sells you the star compass and warns that it only has three moonstone charges. The test consumes one charge, and the needle points toward the Glass Market's buried observatory.",
+      "summary": "At the Glass Market, Tamsin sold the party a star compass. Testing it spent one moonstone charge, leaving two charges, and it pointed toward the buried observatory.",
+      "extraction": {
+        "events": [
+          {
+            "summary": "The party bought the star compass from Tamsin.",
+            "importance": 4
+          },
+          {
+            "summary": "Testing the star compass spent one moonstone charge.",
+            "importance": 4
+          }
+        ],
+        "character_updates": [
+          {
+            "name": "Tamsin",
+            "description": "A Glass Market trader who sold the star compass.",
+            "status": "trusts the party with the star compass"
+          }
+        ],
+        "world_facts": [
+          {
+            "subject": "star compass",
+            "predicate": "has remaining charges",
+            "object": "two moonstone charges",
+            "content": "The star compass has two moonstone charges remaining.",
+            "confidence": 1.0
+          },
+          {
+            "subject": "star compass",
+            "predicate": "points toward",
+            "object": "buried observatory",
+            "content": "The star compass points toward the buried observatory.",
+            "confidence": 0.9
+          }
+        ],
+        "locations": [
+          {
+            "name": "Glass Market",
+            "description": "A bazaar where Tamsin sold the party the star compass."
+          }
+        ]
+      }
+    }
+  ],
+  "expected": {
+    "summary_contains": [
+      "star compass",
+      "leaving two charges",
+      "buried observatory"
+    ],
+    "character_status": {
+      "Tamsin": "trusts the party with the star compass"
+    },
+    "event_summaries": [
+      "The party bought the star compass from Tamsin.",
+      "Testing the star compass spent one moonstone charge."
+    ],
+    "world_fact_contents": [
+      "The star compass has two moonstone charges remaining.",
+      "The star compass points toward the buried observatory."
+    ],
+    "locations": [
+      "Glass Market"
+    ],
+    "search_query": "star compass charges",
+    "search_result_contains": "two moonstone charges"
+  }
+}

@@ -1,0 +1,66 @@
+{
+  "game_title": "Ash Bridge",
+  "system_prompt": "Run tactical fantasy scenes with consequences that persist.",
+  "turns": [
+    {
+      "user": "I throw saltfire at the bone ogre while Brakka holds the bridge.",
+      "assistant": "Saltfire bursts across the Ash Bridge, forcing the bone ogre back. Brakka breaks its charge but takes a deep cut across his ribs.",
+      "summary": "At Ash Bridge, the party used saltfire to drive back a bone ogre. Brakka broke the ogre's charge but was badly cut.",
+      "extraction": {
+        "events": [
+          {
+            "summary": "Brakka broke the bone ogre's charge at Ash Bridge.",
+            "importance": 5
+          },
+          {
+            "summary": "Saltfire forced the bone ogre back.",
+            "importance": 4
+          }
+        ],
+        "character_updates": [
+          {
+            "name": "Brakka",
+            "description": "A shield-bearing fighter who held Ash Bridge.",
+            "status": "injured but standing"
+          }
+        ],
+        "world_facts": [
+          {
+            "subject": "bone ogres",
+            "predicate": "fear",
+            "object": "bright saltfire",
+            "content": "Bone ogres fear bright saltfire.",
+            "confidence": 0.85
+          }
+        ],
+        "locations": [
+          {
+            "name": "Ash Bridge",
+            "description": "A narrow bridge where Brakka held off the bone ogre."
+          }
+        ]
+      }
+    }
+  ],
+  "expected": {
+    "summary_contains": [
+      "saltfire to drive back a bone ogre",
+      "Brakka broke the ogre's charge"
+    ],
+    "character_status": {
+      "Brakka": "injured but standing"
+    },
+    "event_summaries": [
+      "Brakka broke the bone ogre's charge at Ash Bridge.",
+      "Saltfire forced the bone ogre back."
+    ],
+    "world_fact_contents": [
+      "Bone ogres fear bright saltfire."
+    ],
+    "locations": [
+      "Ash Bridge"
+    ],
+    "search_query": "saltfire bone ogre",
+    "search_result_contains": "Bone ogres fear bright saltfire"
+  }
+}
