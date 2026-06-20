@@ -226,6 +226,7 @@ message ListSessionsResponse {
 message SendMessageRequest {
   string session_id = 1;
   string content = 2;
+  string model = 3;
 }
 
 enum MessageFinishReason {

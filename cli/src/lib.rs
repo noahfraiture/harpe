@@ -109,6 +109,8 @@ pub enum ConfigKey {
 
 #[derive(Args, Debug, Clone, PartialEq, Eq)]
 pub struct PlayArgs {
+    #[arg(long)]
+    pub model: Option<String>,
     pub session_id: Option<String>,
 }
 
@@ -208,6 +210,8 @@ pub enum SessionCommand {
         content: Vec<String>,
     },
     Send {
+        #[arg(long)]
+        model: Option<String>,
         session_id: String,
         #[arg(required = true, num_args = 1..)]
         content: Vec<String>,
@@ -852,6 +856,7 @@ async fn session<W: Write>(
             }
         }
         SessionCommand::Send {
+            model,
             session_id,
             content,
         } => {
@@ -859,6 +864,7 @@ async fn session<W: Write>(
                 client,
                 session_id,
                 join_words(content),
+                model,
                 user_id,
                 as_json,
                 writer,
@@ -872,6 +878,7 @@ async fn send_message<W: Write>(
     mut client: SessionServiceClient<Channel>,
     session_id: String,
     content: String,
+    model: Option<String>,
     user_id: String,
     as_json: bool,
     writer: &mut W,
@@ -881,6 +888,7 @@ async fn send_message<W: Write>(
             SendMessageRequest {
                 session_id,
                 content,
+                model: normalize_optional_model(model),
             },
             &user_id,
         )?)
@@ -968,6 +976,7 @@ async fn play<R: BufRead, W: Write>(
             &session.game_id,
             &user_id,
             input,
+            args.model.as_deref(),
             writer,
         )
         .await
@@ -987,6 +996,7 @@ async fn handle_play_input<W: Write>(
     game_id: &str,
     user_id: &str,
     input: &str,
+    model: Option<&str>,
     writer: &mut W,
 ) -> CliResult<bool> {
     match input {
@@ -1115,12 +1125,20 @@ async fn handle_play_input<W: Write>(
         SessionServiceClient::new(channel),
         session_id.to_owned(),
         input.to_owned(),
+        model.map(ToOwned::to_owned),
         user_id.to_owned(),
         false,
         writer,
     )
     .await?;
     Ok(true)
+}
+
+fn normalize_optional_model(model: Option<String>) -> String {
+    model
+        .map(|model| model.trim().to_owned())
+        .filter(|model| !model.is_empty())
+        .unwrap_or_default()
 }
 
 fn write_play_help<W: Write>(writer: &mut W) -> CliResult<()> {
@@ -1981,6 +1999,8 @@ mod tests {
             "--json",
             "session",
             "send",
+            "--model",
+            "gpt-5-mini",
             "session-1",
             "open",
             "the",
@@ -1994,10 +2014,21 @@ mod tests {
             cli.command,
             Command::Session(SessionArgs {
                 command: SessionCommand::Send {
+                    model: Some("gpt-5-mini".to_owned()),
                     session_id: "session-1".to_owned(),
                     content: vec!["open".to_owned(), "the".to_owned(), "gate".to_owned()],
                 }
             })
+        );
+    }
+
+    #[test]
+    fn normalizes_optional_model_for_requests() {
+        assert_eq!(normalize_optional_model(None), "");
+        assert_eq!(normalize_optional_model(Some("   ".to_owned())), "");
+        assert_eq!(
+            normalize_optional_model(Some(" gpt-5-mini ".to_owned())),
+            "gpt-5-mini"
         );
     }
 

@@ -32,6 +32,7 @@ async fn openai_compatible_provider_streams_chat_and_embeds() {
                     content: "Confirm provider conformance.".to_owned(),
                 },
             ],
+            model: None,
         })
         .await
         .unwrap();

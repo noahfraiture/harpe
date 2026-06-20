@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
@@ -1054,6 +1055,7 @@ async fn grpc_send_message_stream_reports_validation_and_empty_assistant_errors(
             SendMessageRequest {
                 session_id: session.id.clone(),
                 content: " ".to_owned(),
+                model: String::new(),
             },
             &user.id,
         ))
@@ -1069,6 +1071,7 @@ async fn grpc_send_message_stream_reports_validation_and_empty_assistant_errors(
             SendMessageRequest {
                 session_id: session.id.clone(),
                 content: "I wait for an answer.".to_owned(),
+                model: String::new(),
             },
             &user.id,
         ))
@@ -1109,6 +1112,59 @@ async fn grpc_send_message_stream_reports_validation_and_empty_assistant_errors(
     let snapshot = metrics.snapshot();
     assert_eq!(snapshot.grpc_failures, 2);
     assert_eq!(snapshot.streamed_messages, 0);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn grpc_send_message_passes_model_override_to_llm() {
+    let store = Arc::new(test_store().await);
+    let user = store
+        .create_user(NewUser {
+            display_name: "Noah".to_owned(),
+        })
+        .await
+        .unwrap();
+    let game = store
+        .create_game(NewGame {
+            owner_user_id: user.id.clone(),
+            title: "Model Override Coast".to_owned(),
+            system_prompt: "Run a model override test.".to_owned(),
+        })
+        .await
+        .unwrap();
+    let session = store
+        .create_session(NewSession {
+            game_id: game.id,
+            title: "Override session".to_owned(),
+        })
+        .await
+        .unwrap();
+    let llm = Arc::new(RecordingModelLlm::new("override response"));
+    let service = HarpeGrpc::new(store, llm.clone());
+    let (channel, server) = spawn_grpc_service(service).await;
+
+    let mut stream = SessionServiceClient::new(channel)
+        .send_message(with_user(
+            SendMessageRequest {
+                session_id: session.id,
+                content: "I ask for a sharper model.".to_owned(),
+                model: " gpt-5-mini ".to_owned(),
+            },
+            &user.id,
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let mut response = String::new();
+    while let Some(delta) = stream.next().await {
+        let delta = delta.unwrap();
+        response.push_str(&delta.delta);
+    }
+
+    assert_eq!(response, "override response");
+    assert_eq!(llm.last_model(), Some("gpt-5-mini".to_owned()));
 
     server.abort();
 }
@@ -1336,6 +1392,7 @@ async fn grpc_send_message_streams_response_and_updates_memory() {
             SendMessageRequest {
                 session_id: session.id.clone(),
                 content: "I lift the rusted latch.".to_owned(),
+                model: String::new(),
             },
             &user.id,
         ))
@@ -1794,6 +1851,49 @@ impl LlmClient for EmptyAssistantLlm {
 
     async fn summarize(&self, _request: SummarizeRequest) -> harpe_server::Result<String> {
         Ok("Empty assistant test summary.".to_owned())
+    }
+
+    async fn extract_memory(
+        &self,
+        _request: ExtractMemoryRequest,
+    ) -> harpe_server::Result<MemoryExtraction> {
+        Ok(MemoryExtraction::default())
+    }
+
+    async fn embed(&self, _text: &str) -> harpe_server::Result<Vec<f32>> {
+        Ok(vec![0.0; 16])
+    }
+}
+
+struct RecordingModelLlm {
+    response: String,
+    last_model: Mutex<Option<String>>,
+}
+
+impl RecordingModelLlm {
+    fn new(response: &str) -> Self {
+        Self {
+            response: response.to_owned(),
+            last_model: Mutex::new(None),
+        }
+    }
+
+    fn last_model(&self) -> Option<String> {
+        self.last_model.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl LlmClient for RecordingModelLlm {
+    async fn stream_chat(&self, request: ChatRequest) -> harpe_server::Result<TextStream> {
+        *self.last_model.lock().unwrap() = request.model;
+        Ok(Box::pin(tokio_stream::iter(vec![Ok(self
+            .response
+            .clone())])))
+    }
+
+    async fn summarize(&self, _request: SummarizeRequest) -> harpe_server::Result<String> {
+        Ok("Recording model summary.".to_owned())
     }
 
     async fn extract_memory(

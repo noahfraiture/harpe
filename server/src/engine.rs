@@ -172,7 +172,10 @@ impl ContextBuilder {
             content: message.content,
         }));
 
-        ChatRequest { messages }
+        ChatRequest {
+            messages,
+            model: None,
+        }
     }
 
     fn system_context(&self, input: &ContextInputs, token_budget: usize) -> String {

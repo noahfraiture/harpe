@@ -23,6 +23,7 @@ pub struct ChatMessage {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChatRequest {
     pub messages: Vec<ChatMessage>,
+    pub model: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -187,10 +188,21 @@ impl HttpLlm {
     }
 
     async fn complete_chat(&self, model: &str, messages: Vec<HttpChatMessage>) -> Result<String> {
+        self.complete_chat_with_response_format(model, messages, None)
+            .await
+    }
+
+    async fn complete_chat_with_response_format(
+        &self,
+        model: &str,
+        messages: Vec<HttpChatMessage>,
+        response_format: Option<ChatResponseFormat>,
+    ) -> Result<String> {
         let payload = ChatCompletionRequest {
             model,
             messages,
             stream: false,
+            response_format,
         };
         let response = self
             .send_json_with_retry("/v1/chat/completions", &payload)
@@ -212,14 +224,16 @@ impl HttpLlm {
 #[async_trait]
 impl LlmClient for HttpLlm {
     async fn stream_chat(&self, request: ChatRequest) -> Result<TextStream> {
+        let ChatRequest { messages, model } = request;
+        let model = model.as_deref().unwrap_or(self.config.chat_model.as_str());
         let payload = ChatCompletionRequest {
-            model: &self.config.chat_model,
-            messages: request
-                .messages
+            model,
+            messages: messages
                 .into_iter()
                 .map(HttpChatMessage::from_chat_message)
                 .collect(),
             stream: true,
+            response_format: None,
         };
         let response = self
             .send_json_with_retry("/v1/chat/completions", &payload)
@@ -283,7 +297,7 @@ impl LlmClient for HttpLlm {
 
     async fn extract_memory(&self, request: ExtractMemoryRequest) -> Result<MemoryExtraction> {
         let content = self
-            .complete_chat(
+            .complete_chat_with_response_format(
                 &self.config.extraction_model,
                 vec![
                     HttpChatMessage {
@@ -295,6 +309,7 @@ impl LlmClient for HttpLlm {
                         content: format_extraction_prompt(&request),
                     },
                 ],
+                Some(ChatResponseFormat::json_object()),
             )
             .await?;
 
@@ -330,6 +345,22 @@ struct ChatCompletionRequest<'a> {
     model: &'a str,
     messages: Vec<HttpChatMessage>,
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_format: Option<ChatResponseFormat>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ChatResponseFormat {
+    #[serde(rename = "type")]
+    kind: &'static str,
+}
+
+impl ChatResponseFormat {
+    fn json_object() -> Self {
+        Self {
+            kind: "json_object",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -667,7 +698,10 @@ mod tests {
     async fn echo_llm_streams_configured_chunks() {
         let llm = EchoLlm::new(vec!["one".to_owned(), " two".to_owned()]);
         let mut stream = llm
-            .stream_chat(ChatRequest { messages: vec![] })
+            .stream_chat(ChatRequest {
+                messages: vec![],
+                model: None,
+            })
             .await
             .unwrap();
 
@@ -841,6 +875,7 @@ mod tests {
                     role: MessageRole::User,
                     content: "I lift the latch.".to_owned(),
                 }],
+                model: None,
             })
             .await
             .unwrap();
@@ -854,6 +889,34 @@ mod tests {
         assert!(request.contains("\"model\":\"chat-model\""));
         assert!(request.contains("\"stream\":true"));
         assert!(request.contains("\"content\":\"I lift the latch.\""));
+    }
+
+    #[tokio::test]
+    async fn http_llm_uses_chat_model_override_when_provided() {
+        let sse = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"The gate opens.\"}}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let mut mock = spawn_mock_http(vec![sse_response(sse)]).await;
+        let llm = test_http_llm(&mock.base_url);
+
+        let mut stream = llm
+            .stream_chat(ChatRequest {
+                messages: vec![ChatMessage {
+                    role: MessageRole::User,
+                    content: "I lift the latch.".to_owned(),
+                }],
+                model: Some("gpt-5-mini".to_owned()),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(stream.next().await.unwrap().unwrap(), "The gate opens.");
+        assert!(stream.next().await.is_none());
+
+        let request = mock.requests.recv().await.unwrap();
+        assert!(request.contains("\"model\":\"gpt-5-mini\""));
+        assert!(!request.contains("\"model\":\"chat-model\""));
     }
 
     #[tokio::test]
@@ -1013,7 +1076,9 @@ mod tests {
         let extraction_request = mock.requests.recv().await.unwrap();
         assert!(summarize_request.contains("\"model\":\"chat-model\""));
         assert!(summarize_request.contains("Previous summary"));
+        assert!(!summarize_request.contains("response_format"));
         assert!(extraction_request.contains("\"model\":\"extraction-model\""));
+        assert!(extraction_request.contains("\"response_format\":{\"type\":\"json_object\"}"));
         assert!(extraction_request.contains("Game id: game-1"));
     }
 

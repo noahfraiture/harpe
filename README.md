@@ -109,6 +109,7 @@ cargo run -q -p harpe-cli -- config show
 cargo run -q -p harpe-cli -- game list
 cargo run -q -p harpe-cli -- session messages "$SESSION_ID"
 cargo run -q -p harpe-cli -- session context "$SESSION_ID" "I inspect the sea gate."
+cargo run -q -p harpe-cli -- session send --model gpt-5-mini "$SESSION_ID" "I inspect the sea gate."
 cargo run -q -p harpe-cli -- memory search "$SESSION_ID" "sea gate"
 cargo run -q -p harpe-cli -- backup stream --game "$GAME_ID" > harpe-backup.ndjson
 cargo run -q -p harpe-cli -- metrics export

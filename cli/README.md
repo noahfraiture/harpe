@@ -91,6 +91,7 @@ harpe session create --title "First watch"
 harpe session messages <session-id>
 harpe session context <session-id> "I inspect the sea gate."
 harpe session send <session-id> "I inspect the sea gate."
+harpe session send --model gpt-5-mini <session-id> "I inspect the sea gate."
 harpe memory summary <session-id>
 harpe memory search <session-id> "sea gate"
 harpe backup export --out backup.json

@@ -764,7 +764,8 @@ async fn run_send_message(
         })
         .await?;
 
-    let chat_request = build_context_for_turn(
+    let model = optional_model_override(&request.model);
+    let mut chat_request = build_context_for_turn(
         &session,
         &game,
         &request.content,
@@ -774,6 +775,7 @@ async fn run_send_message(
         &context_builder,
     )
     .await?;
+    chat_request.model = model;
 
     let assistant_id = new_id();
     let mut response_stream = llm.stream_chat(chat_request).await?;
@@ -836,6 +838,11 @@ async fn run_send_message(
         .await;
 
     Ok(())
+}
+
+fn optional_model_override(model: &str) -> Option<String> {
+    let model = model.trim();
+    (!model.is_empty()).then(|| model.to_owned())
 }
 
 #[tracing::instrument(skip_all, fields(session_id = %session.id, game_id = %game.id))]
@@ -1394,6 +1401,7 @@ mod tests {
                         content: "I open the gate.".to_owned(),
                     },
                 ],
+                model: None,
             },
             &ContextBuilder::default(),
         );
@@ -1401,6 +1409,16 @@ mod tests {
         assert_eq!(response.messages.len(), 2);
         assert!(response.estimated_tokens >= response.messages[0].estimated_tokens);
         assert_eq!(response.messages[1].role, pb::MessageRole::User as i32);
+    }
+
+    #[test]
+    fn optional_model_override_trims_blank_values() {
+        assert_eq!(optional_model_override(""), None);
+        assert_eq!(optional_model_override("   "), None);
+        assert_eq!(
+            optional_model_override(" gpt-5-mini "),
+            Some("gpt-5-mini".to_owned())
+        );
     }
 
     #[test]
