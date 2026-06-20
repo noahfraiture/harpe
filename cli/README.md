@@ -21,7 +21,18 @@ The client resolves settings in this order:
 
 - address: `--addr`, `HARPE_GRPC_ADDR`, client config, `http://[::1]:50051`
 - user: `--user-id`, `HARPE_USER_ID`, client config
-- config path: `--config`, `HARPE_CONFIG`, `$XDG_CONFIG_HOME/harpe/config.json`, `$HOME/.config/harpe/config.json`
+- config path: `--config`, `HARPE_CONFIG`, `$XDG_CONFIG_HOME/harpe/config.toml`, `$HOME/.config/harpe/config.toml`
+
+Existing `config.json` files are still read as a legacy fallback when `config.toml` is not present. The `user_id` is not an auth token; it is the backend profile id used to own and filter your games. Create one once, store it in config, and then normal commands can omit `--user-id`.
+
+Example config:
+
+```toml
+addr = "http://harpe:50051"
+user_id = "user_..."
+game_id = "game_..."
+session_id = "session_..."
+```
 
 Common config commands:
 

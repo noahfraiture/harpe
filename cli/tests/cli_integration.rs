@@ -569,7 +569,7 @@ fn temp_path(name: &str) -> std::path::PathBuf {
 }
 
 fn integration_config_path() -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("harpe-cli-integration-{}.json", std::process::id()))
+    std::env::temp_dir().join(format!("harpe-cli-integration-{}.toml", std::process::id()))
 }
 
 fn assert_error_contains(error: &(dyn std::error::Error + Send + Sync), expected: &str) {

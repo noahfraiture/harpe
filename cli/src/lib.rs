@@ -30,6 +30,8 @@ pub mod tui;
 pub type CliResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
 const DEFAULT_ADDR: &str = "http://[::1]:50051";
+const DEFAULT_CONFIG_FILE: &str = "config.toml";
+const LEGACY_CONFIG_FILE: &str = "config.json";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientConfig {
@@ -1614,14 +1616,16 @@ fn config_path(explicit_path: Option<&Path>) -> CliResult<PathBuf> {
     }
 
     if let Some(config_home) = std::env::var_os("XDG_CONFIG_HOME") {
-        return Ok(PathBuf::from(config_home).join("harpe").join("config.json"));
+        return Ok(PathBuf::from(config_home)
+            .join("harpe")
+            .join(DEFAULT_CONFIG_FILE));
     }
 
     if let Some(home) = std::env::var_os("HOME") {
         return Ok(PathBuf::from(home)
             .join(".config")
             .join("harpe")
-            .join("config.json"));
+            .join(DEFAULT_CONFIG_FILE));
     }
 
     Err(invalid_input(
@@ -1630,16 +1634,34 @@ fn config_path(explicit_path: Option<&Path>) -> CliResult<PathBuf> {
 }
 
 fn load_config_from_path(path: &Path) -> CliResult<ClientConfig> {
+    if !path.exists()
+        && path.file_name().and_then(|name| name.to_str()) == Some(DEFAULT_CONFIG_FILE)
+    {
+        let legacy_path = path.with_file_name(LEGACY_CONFIG_FILE);
+        if legacy_path.exists() {
+            return load_config_file(&legacy_path);
+        }
+    }
+
     if !path.exists() {
         return Ok(ClientConfig::default());
     }
 
+    load_config_file(path)
+}
+
+fn load_config_file(path: &Path) -> CliResult<ClientConfig> {
     let content = std::fs::read_to_string(path)?;
+
     if content.trim().is_empty() {
         return Ok(ClientConfig::default());
     }
 
-    Ok(serde_json::from_str(&content)?)
+    if is_json_path(path) {
+        Ok(serde_json::from_str(&content)?)
+    } else {
+        Ok(toml::from_str(&content)?)
+    }
 }
 
 fn save_config_to_path(path: &Path, config: &ClientConfig) -> CliResult<()> {
@@ -1648,8 +1670,19 @@ fn save_config_to_path(path: &Path, config: &ClientConfig) -> CliResult<()> {
     {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, format!("{}\n", serde_json::to_string_pretty(config)?))?;
+    let content = if is_json_path(path) {
+        serde_json::to_string_pretty(config)?
+    } else {
+        toml::to_string_pretty(config)?
+    };
+    std::fs::write(path, format!("{content}\n"))?;
     Ok(())
+}
+
+fn is_json_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
 }
 
 fn resolve_addr(cli_addr: Option<&str>, config: &ClientConfig) -> CliResult<String> {
@@ -2106,7 +2139,7 @@ mod tests {
 
     #[test]
     fn client_config_round_trips_and_resolves_defaults() {
-        let path = temp_test_path("client-config.json");
+        let path = temp_test_path("client-config.toml");
         let config = ClientConfig {
             addr: Some("http://127.0.0.1:50051".to_owned()),
             user_id: Some("user-1".to_owned()),
@@ -2116,14 +2149,58 @@ mod tests {
 
         save_config_to_path(&path, &config).unwrap();
         let loaded = load_config_from_path(&path).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
 
         assert_eq!(loaded, config);
+        assert!(content.contains("addr = \"http://127.0.0.1:50051\""));
         assert_eq!(
             resolve_addr(None, &loaded).unwrap(),
             "http://127.0.0.1:50051"
         );
         assert_eq!(resolve_user_id(None, &loaded), Some("user-1"));
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn client_config_still_reads_and_writes_explicit_json_paths() {
+        let path = temp_test_path("client-config.json");
+        let config = ClientConfig {
+            addr: Some("http://127.0.0.1:50051".to_owned()),
+            user_id: Some("user-1".to_owned()),
+            game_id: None,
+            session_id: None,
+        };
+
+        save_config_to_path(&path, &config).unwrap();
+        let loaded = load_config_from_path(&path).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+
+        assert_eq!(loaded, config);
+        assert!(content.contains("\"user_id\": \"user-1\""));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn client_config_falls_back_to_legacy_json_when_default_toml_is_missing() {
+        let dir = temp_test_path("legacy-config-dir");
+        std::fs::create_dir_all(&dir).unwrap();
+        let toml_path = dir.join(DEFAULT_CONFIG_FILE);
+        let json_path = dir.join(LEGACY_CONFIG_FILE);
+        std::fs::write(
+            &json_path,
+            r#"{
+  "addr": "http://127.0.0.1:50051",
+  "user_id": "user-1"
+}"#,
+        )
+        .unwrap();
+
+        let loaded = load_config_from_path(&toml_path).unwrap();
+
+        assert_eq!(loaded.addr.as_deref(), Some("http://127.0.0.1:50051"));
+        assert_eq!(loaded.user_id.as_deref(), Some("user-1"));
+        std::fs::remove_file(json_path).unwrap();
+        std::fs::remove_dir(dir).unwrap();
     }
 
     #[test]

@@ -80,8 +80,20 @@ Defaults:
 
 - address resolution is `--addr`, then `HARPE_GRPC_ADDR`, then client config, then `http://[::1]:50051`; bare addresses such as `[::1]:50051` are also accepted
 - user resolution is `--user-id`, then `HARPE_USER_ID`, then client config
-- client config defaults to `$XDG_CONFIG_HOME/harpe/config.json` or `$HOME/.config/harpe/config.json`; override with `--config`
+- client config defaults to `$XDG_CONFIG_HOME/harpe/config.toml` or `$HOME/.config/harpe/config.toml`; override with `--config`
+- existing `config.json` files are still read as a legacy fallback when `config.toml` is not present
 - `--json` switches command output to structured JSON where the command returns a single response
+
+The `user_id` is not an auth token. It is the local backend profile id used to own and filter games. Create it once, save it in config, then omit `--user-id` for normal CLI/TUI usage.
+
+Example config:
+
+```toml
+addr = "http://harpe:50051"
+user_id = "user_..."
+game_id = "game_..."
+session_id = "session_..."
+```
 
 Basic flow:
 
