@@ -25,6 +25,8 @@ use tonic::Request;
 use tonic::metadata::MetadataValue;
 use tonic::transport::{Channel, Endpoint};
 
+pub mod tui;
+
 pub type CliResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
 const DEFAULT_ADDR: &str = "http://[::1]:50051";

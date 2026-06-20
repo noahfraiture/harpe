@@ -27,7 +27,7 @@ Harpe is split into a backend service and thin clients:
 - SurrealDB stores users, games, sessions, messages, summaries, characters, events, world facts, locations, graph edges, memory chunks, background jobs, and backup snapshots.
 - The LLM layer has a deterministic echo implementation for development/tests and an OpenAI-compatible HTTP adapter for real providers.
 - Background jobs update durable memory after assistant turns, with retry/backoff and admin/debug RPCs for failed jobs and raw memory chunks.
-- `harpe-cli` is the first client. Future TUI, macOS, and iOS clients should use the same gRPC API and can copy the CLI workflows: create/select user, game, and session, stream `SendMessage`, and fetch memory/context views as needed.
+- `harpe-cli` provides two terminal clients: the `harpe` command for scripted/admin workflows and `harpe-tui` for interactive roleplay. Future macOS and iOS clients should use the same gRPC API and can copy these workflows: create/select user, game, and session, stream `SendMessage`, and fetch memory/context views as needed.
 
 ## Run
 
@@ -128,6 +128,41 @@ Inside `harpe play`, enter normal player messages or slash commands:
 ```
 
 See [cli/README.md](cli/README.md) for focused CLI usage.
+
+## TUI
+
+`harpe-tui` is the richer terminal roleplay cockpit. It uses the same config file as `harpe`, so the user/game/session selected by CLI commands are reused automatically.
+
+```sh
+cargo run -q -p harpe-cli --bin harpe-tui -- \
+  --addr http://harpe:50051 \
+  --user-id <user-id>
+```
+
+You can also select the active story directly:
+
+```sh
+cargo run -q -p harpe-cli --bin harpe-tui -- \
+  --addr http://harpe:50051 \
+  --user-id <user-id> \
+  --game-id <game-id> \
+  --session-id <session-id> \
+  --model gpt-5-nano
+```
+
+Main keys:
+
+- `Enter`: send the composer as the next player message
+- `Alt-Enter` or `Ctrl-J`: insert a newline
+- `Ctrl-G`: open the game finder
+- `Ctrl-L`: open the session finder
+- `Ctrl-T`: switch the right context panel between Cast, Lore, Map, Events, and Context
+- `Ctrl-P`: preview the context that would be sent to the model for the current composer text
+- `Ctrl-M`: search memory using the composer text
+- `Ctrl-R`: refresh session data
+- `PageUp` / `PageDown`: scroll the transcript
+- `?`: help
+- `Ctrl-Q` or `Ctrl-C`: quit
 
 ## Test
 

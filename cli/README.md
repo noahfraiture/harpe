@@ -1,6 +1,7 @@
 # Harpe CLI
 
 `harpe` is the terminal client for the Harpe gRPC backend.
+`harpe-tui` is the interactive terminal roleplay cockpit built on the same gRPC API and config file.
 
 Run the backend first:
 
@@ -76,6 +77,51 @@ Normal input is sent as the next player message and streams the assistant respon
 /memory sea gate
 /help
 /quit
+```
+
+## TUI Cockpit
+
+Run the richer terminal UI through Cargo:
+
+```sh
+cargo run -q -p harpe-cli --bin harpe-tui -- \
+  --addr http://harpe:50051 \
+  --user-id <user-id>
+```
+
+Or pin the story and model for the session:
+
+```sh
+cargo run -q -p harpe-cli --bin harpe-tui -- \
+  --addr http://harpe:50051 \
+  --user-id <user-id> \
+  --game-id <game-id> \
+  --session-id <session-id> \
+  --model gpt-5-nano
+```
+
+The screen is organized as a roleplay cockpit:
+
+- header: active game, session, selected model, current user, and backend health
+- left panel on wide terminals: current scene, location, open threads, and recent lore
+- center: transcript
+- right panel: Cast, Lore, Map, Events, and Context tabs
+- bottom: multiline composer
+
+Key bindings:
+
+```text
+Enter             send message
+Alt-Enter/Ctrl-J  newline
+Ctrl-G            game finder
+Ctrl-L            session finder
+Ctrl-T            switch context panel
+Ctrl-P            preview model context
+Ctrl-M            search memory from composer text
+Ctrl-R            refresh active data
+PageUp/PageDown   scroll transcript
+?                 help
+Ctrl-Q/Ctrl-C     quit
 ```
 
 ## Useful Commands
