@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use futures_util::StreamExt;
-use harpe_server::pb::{
+use harpe_proto::pb::{
     self, AdminJobStatus, BackgroundJobDebug, Character, ContextMessage, CreateGameRequest,
     CreateSessionRequest, CreateUserRequest, Event, ExportGameRequest, ExportMetricsRequest, Game,
     GameBackupChunk, GameSnapshot, GetCharacterRequest, GetGameRequest, GetMetricsRequest,

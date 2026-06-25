@@ -1610,6 +1610,7 @@ dependencies = [
  "clap",
  "crossterm",
  "futures-util",
+ "harpe-proto",
  "harpe-server",
  "ratatui",
  "rexpect",
@@ -1626,6 +1627,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "harpe-proto"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "prost-types",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+]
+
+[[package]]
 name = "harpe-server"
 version = "0.1.0"
 dependencies = [
@@ -1635,8 +1647,7 @@ dependencies = [
  "chrono",
  "futures-core",
  "futures-util",
- "prost",
- "prost-types",
+ "harpe-proto",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -1645,8 +1656,6 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tonic",
- "tonic-prost",
- "tonic-prost-build",
  "tracing",
  "tracing-subscriber",
  "uuid",

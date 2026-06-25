@@ -13,7 +13,7 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use futures_util::StreamExt;
-use harpe_server::pb::{
+use harpe_proto::pb::{
     self, Character, ContextMessage, Event, Game, GetGameRequest, GetSessionRequest,
     GetStorySummaryRequest, HealthCheckRequest, HealthCheckResponse, ListCharactersRequest,
     ListEventsRequest, ListGamesRequest, ListLocationsRequest, ListMessagesRequest,

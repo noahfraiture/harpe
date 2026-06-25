@@ -10,8 +10,6 @@ pub mod observability;
 pub mod runtime;
 pub mod store;
 
-pub mod pb {
-    tonic::include_proto!("harpe.v1");
-}
+pub use harpe_proto::pb;
 
 pub use error::{HarpeError, Result};
