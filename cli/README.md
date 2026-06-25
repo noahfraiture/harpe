@@ -3,6 +3,15 @@
 `harpe` is the terminal client for the Harpe gRPC backend.
 `harpe-tui` is the interactive terminal roleplay cockpit built on the same gRPC API and config file.
 
+## Implementation Layout
+
+- `src/args.rs`: clap command schema and small argument conversions.
+- `src/config.rs`: `~/.config/harpe/config.toml`, legacy JSON fallback, address normalization, and required-value validation.
+- `src/commands/`: per-domain command handlers for config, system, user, game, session, play, memory, backup, and admin workflows.
+- `src/output.rs`: text and JSON output shapes plus protobuf enum display names.
+- `src/rpc.rs`: shared gRPC metadata helpers.
+- `src/tui/`: TUI client wrapper, state, rendering, and terminal-safe text helpers.
+
 Run the backend first:
 
 ```sh

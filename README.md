@@ -22,12 +22,18 @@ The current milestone is a Rust gRPC server with:
 
 Harpe is split into a backend service and thin clients:
 
-- `server/proto/harpe/v1/harpe.proto` defines the gRPC API shared by all clients.
-- `harpe-server` hosts the gRPC services, validates ownership through `x-user-id` metadata, builds model context, streams assistant responses, and schedules background memory updates after turns.
+- `harpe-proto` owns `proto/proto/harpe/v1/harpe.proto` and generated Rust bindings. Backend, CLI, TUI, and future Apple clients should treat this crate/proto file as the API contract.
+- `harpe-server` hosts the backend. The current module layout is:
+  - `domain/`: story/game data types and storage-safe enum conversions
+  - `engine/`: context budgeting, token estimation, formatting, and relevance scoring
+  - `llm/`: provider trait, echo test provider, OpenAI-compatible HTTP provider, SSE parsing, embeddings, and extraction prompts/parsing
+  - `jobs/`: durable memory update jobs, payloads, retry/backoff, and runner
+  - `db/surreal/`: SurrealDB migrations, row DTOs, graph relations, normalization, and search helpers
+  - `api/grpc/`: gRPC service implementations, ownership checks, health, pagination, and protobuf/domain conversion
 - SurrealDB stores users, games, sessions, messages, summaries, characters, events, world facts, locations, graph edges, memory chunks, background jobs, and backup snapshots.
-- The LLM layer has a deterministic echo implementation for development/tests and an OpenAI-compatible HTTP adapter for real providers.
 - Background jobs update durable memory after assistant turns, with retry/backoff and admin/debug RPCs for failed jobs and raw memory chunks.
-- `harpe-cli` provides two terminal clients: the `harpe` command for scripted/admin workflows and `harpe-tui` for interactive roleplay. Future macOS and iOS clients should use the same gRPC API and can copy these workflows: create/select user, game, and session, stream `SendMessage`, and fetch memory/context views as needed.
+- `harpe-cli` provides two terminal clients. `harpe` is split into argument parsing, config, output formatting, RPC metadata helpers, and per-domain command handlers. `harpe-tui` is split into runtime flow, gRPC client wrapper, app state, rendering, and text helpers.
+- Future macOS and iOS clients should use the same gRPC API and can copy these workflows: create/select user, game, and session, stream `SendMessage`, and fetch memory/context views as needed.
 
 ## Run
 
