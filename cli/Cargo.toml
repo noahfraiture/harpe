@@ -3,6 +3,7 @@ name = "harpe-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+default-run = "harpe"
 
 [[bin]]
 name = "harpe"
