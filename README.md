@@ -170,7 +170,7 @@ Main keys:
 - `Ctrl-L`: open the session finder
 - `Ctrl-T`: switch the right context panel between Cast, Lore, Map, Events, and Context
 - `Ctrl-P`: preview the context that would be sent to the model for the current composer text
-- `Ctrl-M`: search memory using the composer text
+- `Ctrl-F`: search memory using the composer text
 - `Ctrl-R`: refresh session data
 - `PageUp` / `PageDown`: scroll the transcript
 - `?`: help

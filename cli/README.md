@@ -128,7 +128,7 @@ Ctrl-G            game finder
 Ctrl-L            session finder
 Ctrl-T            switch context panel
 Ctrl-P            preview model context
-Ctrl-M            search memory from composer text
+Ctrl-F            search memory from composer text
 Ctrl-R            refresh active data
 PageUp/PageDown   scroll transcript
 ?                 help

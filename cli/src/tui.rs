@@ -769,11 +769,7 @@ async fn handle_key(
             modifiers: KeyModifiers::CONTROL,
             ..
         } => preview_context(client, app).await?,
-        KeyEvent {
-            code: KeyCode::Char('m'),
-            modifiers: KeyModifiers::CONTROL,
-            ..
-        } => search_memory(client, app).await?,
+        key if is_memory_search_key(key) => search_memory(client, app).await?,
         KeyEvent {
             code: KeyCode::PageUp,
             ..
@@ -831,6 +827,17 @@ fn dismisses_error(key: KeyEvent) -> bool {
         } | KeyEvent {
             code: KeyCode::Char(_),
             modifiers: KeyModifiers::NONE,
+            ..
+        }
+    )
+}
+
+fn is_memory_search_key(key: KeyEvent) -> bool {
+    matches!(
+        key,
+        KeyEvent {
+            code: KeyCode::Char('f'),
+            modifiers: KeyModifiers::CONTROL,
             ..
         }
     )
@@ -985,7 +992,7 @@ async fn search_memory(client: &TuiClient, app: &mut App) -> CliResult<()> {
     };
     let query = app.composer_content();
     if query.is_empty() {
-        app.set_status("type a query in the composer before Ctrl-M");
+        app.set_status("type a query in the composer before Ctrl-F");
         return Ok(());
     }
     app.search_results = client.search_memory(session.id.clone(), query).await?;
@@ -1404,7 +1411,7 @@ fn render_context(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
         }
     } else if app.search_results.is_empty() {
         lines.push(Line::from("Ctrl-P previews injected context."));
-        lines.push(Line::from("Ctrl-M searches memory using composer text."));
+        lines.push(Line::from("Ctrl-F searches memory using composer text."));
     }
 
     frame.render_widget(
@@ -1421,7 +1428,7 @@ fn render_composer(frame: &mut ratatui::Frame<'_>, app: &mut App, area: Rect) {
 
 fn render_footer(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
     let footer = format!(
-        "Enter send | Alt-Enter newline | Ctrl-G game | Ctrl-L session | Ctrl-T panel | Ctrl-P context | Ctrl-M memory | Ctrl-R refresh | ? help | Ctrl-Q quit | {}",
+        "Enter send | Alt-Enter newline | Ctrl-G game | Ctrl-L session | Ctrl-T panel | Ctrl-P context | Ctrl-F memory | Ctrl-R refresh | ? help | Ctrl-Q quit | {}",
         app.addr
     );
     frame.render_widget(
@@ -1485,7 +1492,7 @@ fn render_help(frame: &mut ratatui::Frame<'_>, area: Rect) {
         Line::from("Ctrl-G opens the game finder; Ctrl-L opens the session finder."),
         Line::from("Ctrl-T cycles Cast/Lore/Map/Events/Context."),
         Line::from("Ctrl-P previews the exact context for the composer text."),
-        Line::from("Ctrl-M searches memory using the composer text."),
+        Line::from("Ctrl-F searches memory using the composer text."),
         Line::from("Ctrl-R refreshes active session data."),
         Line::from("PageUp/PageDown scrolls the transcript."),
         Line::from("Esc closes overlays. Ctrl-Q quits."),
@@ -1779,6 +1786,22 @@ mod tests {
         assert!(!dismisses_error(KeyEvent::new(
             KeyCode::Char('x'),
             KeyModifiers::CONTROL
+        )));
+    }
+
+    #[test]
+    fn memory_search_uses_terminal_safe_ctrl_f_binding() {
+        assert!(is_memory_search_key(KeyEvent::new(
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(!is_memory_search_key(KeyEvent::new(
+            KeyCode::Char('m'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(!is_memory_search_key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE
         )));
     }
 
