@@ -1,4 +1,19 @@
-use super::*;
+use std::io::Write;
+
+use harpe_proto::pb::{
+    GetCharacterRequest, GetStorySummaryRequest, ListCharactersRequest, ListEventsRequest,
+    ListLocationsRequest, ListWorldFactsRequest, SearchMemoryRequest,
+    memory_service_client::MemoryServiceClient,
+};
+use serde_json::json;
+use tonic::transport::Channel;
+
+use crate::config::required_config_value;
+use crate::output::{
+    character_json, event_json, location_json, memory_hit_json, page_json, story_summary_json,
+    world_fact_json, write_json,
+};
+use crate::{CliResult, ClientConfig, MemoryArgs, MemoryCommand, join_words, with_user};
 
 pub(crate) async fn memory<W: Write>(
     channel: Channel,

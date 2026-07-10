@@ -132,6 +132,13 @@ pub(crate) fn required_config_value(name: &str, value: Option<&str>) -> CliResul
         .ok_or_else(|| invalid_input(format!("set {name} in config or pass it explicitly")))
 }
 
+pub(crate) fn normalize_optional_model(model: Option<String>) -> String {
+    model
+        .map(|model| model.trim().to_owned())
+        .filter(|model| !model.is_empty())
+        .unwrap_or_default()
+}
+
 pub fn normalize_addr(addr: &str) -> CliResult<String> {
     let addr = addr.trim();
     if addr.is_empty() {

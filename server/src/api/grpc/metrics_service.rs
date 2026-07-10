@@ -1,4 +1,10 @@
-use super::*;
+use tonic::{Request, Response, Status};
+
+use crate::HarpeError;
+use crate::pb::{self, ExportMetricsRequest, GetMetricsRequest, metrics_service_server};
+
+use super::HarpeGrpc;
+use super::convert::{metrics_to_pb, status_from_error};
 
 #[tonic::async_trait]
 impl metrics_service_server::MetricsService for HarpeGrpc {
@@ -6,9 +12,7 @@ impl metrics_service_server::MetricsService for HarpeGrpc {
         &self,
         _request: Request<GetMetricsRequest>,
     ) -> std::result::Result<Response<pb::MetricsSnapshot>, Status> {
-        self.metrics.record_grpc_request();
-        let _latency = self.metrics.track_grpc_latency();
-        tracing::debug!(rpc = "MetricsService.GetMetrics");
+        let _request = self.observe_request("MetricsService.GetMetrics");
 
         Ok(Response::new(metrics_to_pb(self.metrics.snapshot())))
     }
@@ -17,9 +21,7 @@ impl metrics_service_server::MetricsService for HarpeGrpc {
         &self,
         request: Request<ExportMetricsRequest>,
     ) -> std::result::Result<Response<pb::ExportMetricsResponse>, Status> {
-        self.metrics.record_grpc_request();
-        let _latency = self.metrics.track_grpc_latency();
-        tracing::debug!(rpc = "MetricsService.ExportMetrics");
+        let _request = self.observe_request("MetricsService.ExportMetrics");
         let request = request.into_inner();
         let format = pb::MetricsExportFormat::try_from(request.format).map_err(|_| {
             status_from_error(HarpeError::Validation(format!(

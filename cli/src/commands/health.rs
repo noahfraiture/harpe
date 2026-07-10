@@ -1,4 +1,10 @@
-use super::*;
+use std::io::Write;
+
+use harpe_proto::pb::{HealthCheckRequest, health_service_client::HealthServiceClient};
+use tonic::transport::Channel;
+
+use crate::output::{health_json, write_json};
+use crate::{CliResult, HealthArgs, serving_status_name};
 
 pub(crate) async fn health<W: Write>(
     channel: Channel,

@@ -1,4 +1,14 @@
-use super::*;
+use tonic::{Request, Response, Status};
+
+use crate::domain::NewGame;
+use crate::pb::{self, CreateGameRequest, GetGameRequest, ListGamesRequest, game_service_server};
+
+use super::HarpeGrpc;
+use super::convert::{game_to_pb, status_from_error};
+use super::ownership::{
+    optional_user_id, require_owned_game, require_user_id, resolve_owner_user_id,
+};
+use super::pagination::{page_info, request_limit};
 
 #[tonic::async_trait]
 impl game_service_server::GameService for HarpeGrpc {
@@ -6,9 +16,7 @@ impl game_service_server::GameService for HarpeGrpc {
         &self,
         request: Request<CreateGameRequest>,
     ) -> std::result::Result<Response<pb::Game>, Status> {
-        self.metrics.record_grpc_request();
-        let _latency = self.metrics.track_grpc_latency();
-        tracing::debug!(rpc = "GameService.CreateGame");
+        let _request = self.observe_request("GameService.CreateGame");
         let metadata_user_id = optional_user_id(request.metadata()).map_err(status_from_error)?;
         let request = request.into_inner();
         let owner_user_id =
@@ -31,9 +39,7 @@ impl game_service_server::GameService for HarpeGrpc {
         &self,
         request: Request<ListGamesRequest>,
     ) -> std::result::Result<Response<pb::ListGamesResponse>, Status> {
-        self.metrics.record_grpc_request();
-        let _latency = self.metrics.track_grpc_latency();
-        tracing::debug!(rpc = "GameService.ListGames");
+        let _request = self.observe_request("GameService.ListGames");
         let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let request = request.into_inner();
         let games = self
@@ -56,9 +62,7 @@ impl game_service_server::GameService for HarpeGrpc {
         &self,
         request: Request<GetGameRequest>,
     ) -> std::result::Result<Response<pb::Game>, Status> {
-        self.metrics.record_grpc_request();
-        let _latency = self.metrics.track_grpc_latency();
-        tracing::debug!(rpc = "GameService.GetGame");
+        let _request = self.observe_request("GameService.GetGame");
         let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let game_id = request.into_inner().game_id;
         let game = require_owned_game(self.store.as_ref(), &game_id, &user_id)

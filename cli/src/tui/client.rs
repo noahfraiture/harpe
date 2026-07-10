@@ -12,6 +12,7 @@ use tokio::sync::mpsc;
 use tonic::transport::Channel;
 
 use super::state::{AppEvent, ContextPreview};
+use crate::config::normalize_optional_model;
 use crate::{CliResult, with_user};
 
 const DEFAULT_PAGE_SIZE: u32 = 50;
@@ -94,14 +95,16 @@ impl TuiClient {
             .messages)
     }
 
-    pub(super) async fn summary(&self, session_id: String) -> CliResult<StorySummary> {
-        Ok(MemoryServiceClient::new(self.channel.clone())
-            .get_story_summary(with_user(
-                GetStorySummaryRequest { session_id },
-                &self.user_id,
-            )?)
-            .await?
-            .into_inner())
+    pub(super) async fn summary(&self, session_id: String) -> CliResult<Option<StorySummary>> {
+        let request = with_user(GetStorySummaryRequest { session_id }, &self.user_id)?;
+        match MemoryServiceClient::new(self.channel.clone())
+            .get_story_summary(request)
+            .await
+        {
+            Ok(response) => Ok(Some(response.into_inner())),
+            Err(status) if status.code() == tonic::Code::NotFound => Ok(None),
+            Err(status) => Err(status.into()),
+        }
     }
 
     pub(super) async fn characters(&self, game_id: String) -> CliResult<Vec<Character>> {
@@ -236,7 +239,7 @@ impl TuiClient {
                 SendMessageRequest {
                     session_id,
                     content,
-                    model: normalize_model(model),
+                    model: normalize_optional_model(model),
                 },
                 &self.user_id,
             )?)
@@ -250,10 +253,15 @@ impl TuiClient {
             }
             if delta.done {
                 tx.send(AppEvent::SendComplete).await?;
-                break;
+                return Ok(());
             }
         }
-        Ok(())
+
+        Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "message stream ended before its completion marker",
+        )
+        .into())
     }
 }
 
@@ -262,11 +270,4 @@ fn page(page_size: u32) -> PageRequest {
         page_size,
         page_token: String::new(),
     }
-}
-
-fn normalize_model(model: Option<String>) -> String {
-    model
-        .map(|model| model.trim().to_owned())
-        .filter(|model| !model.is_empty())
-        .unwrap_or_default()
 }

@@ -1,4 +1,13 @@
-use super::*;
+use std::io::Write;
+
+use harpe_proto::pb::{
+    ExportMetricsRequest, GetMetricsRequest, MetricsExportFormat,
+    metrics_service_client::MetricsServiceClient,
+};
+use tonic::transport::Channel;
+
+use crate::output::{metrics_json, write_json, write_path_result};
+use crate::{CliResult, MetricsArgs, MetricsCommand};
 
 pub(crate) async fn metrics<W: Write>(
     channel: Channel,

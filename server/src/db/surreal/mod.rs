@@ -32,7 +32,11 @@ use normalize::{
 #[cfg(test)]
 use relations::RelationSpec;
 use relations::{edge_id, relation_spec};
-use rows::*;
+use rows::{
+    CharacterRow, EventRow, GameRow, GraphEdgeRow, JobRow, LocationRow, MemoryChunkRow,
+    MemorySearchCandidate, MemorySearchRow, MessageRow, MigrationRow, SessionRow, SummaryRow,
+    UserRow, WorldFactRow,
+};
 use search::{fixed_embedding, indexed_embedding_field, lexical_score};
 use validation::validate_present;
 

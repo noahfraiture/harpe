@@ -1,4 +1,21 @@
-use super::*;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
+use tonic::{Request, Response, Status};
+
+use crate::pb::{
+    self, ExportGameRequest, GetCharacterRequest, GetStorySummaryRequest, ListCharactersRequest,
+    ListEventsRequest, ListLocationsRequest, ListWorldFactsRequest, SearchMemoryRequest,
+    memory_service_server,
+};
+
+use super::HarpeGrpc;
+use super::convert::{
+    character_to_pb, event_to_pb, location_to_pb, memory_hit_to_pb, snapshot_to_pb,
+    status_from_error, summary_to_pb, world_fact_to_pb,
+};
+use super::ownership::{require_owned_game, require_owned_session, require_user_id};
+use super::pagination::{page_info, request_limit, truncate_to_limit};
+use super::run_export_game_stream;
 
 #[tonic::async_trait]
 impl memory_service_server::MemoryService for HarpeGrpc {
@@ -8,9 +25,7 @@ impl memory_service_server::MemoryService for HarpeGrpc {
         &self,
         request: Request<GetStorySummaryRequest>,
     ) -> std::result::Result<Response<pb::StorySummary>, Status> {
-        self.metrics.record_grpc_request();
-        let _latency = self.metrics.track_grpc_latency();
-        tracing::debug!(rpc = "MemoryService.GetStorySummary");
+        let _request = self.observe_request("MemoryService.GetStorySummary");
         let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let request = request.into_inner();
         require_owned_session(self.store.as_ref(), &request.session_id, &user_id)
@@ -30,9 +45,7 @@ impl memory_service_server::MemoryService for HarpeGrpc {
         &self,
         request: Request<ListCharactersRequest>,
     ) -> std::result::Result<Response<pb::ListCharactersResponse>, Status> {
-        self.metrics.record_grpc_request();
-        let _latency = self.metrics.track_grpc_latency();
-        tracing::debug!(rpc = "MemoryService.ListCharacters");
+        let _request = self.observe_request("MemoryService.ListCharacters");
         let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let request = request.into_inner();
         require_owned_game(self.store.as_ref(), &request.game_id, &user_id)
@@ -63,9 +76,7 @@ impl memory_service_server::MemoryService for HarpeGrpc {
         &self,
         request: Request<GetCharacterRequest>,
     ) -> std::result::Result<Response<pb::Character>, Status> {
-        self.metrics.record_grpc_request();
-        let _latency = self.metrics.track_grpc_latency();
-        tracing::debug!(rpc = "MemoryService.GetCharacter");
+        let _request = self.observe_request("MemoryService.GetCharacter");
         let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let character = self
             .store
@@ -83,9 +94,7 @@ impl memory_service_server::MemoryService for HarpeGrpc {
         &self,
         request: Request<ListEventsRequest>,
     ) -> std::result::Result<Response<pb::ListEventsResponse>, Status> {
-        self.metrics.record_grpc_request();
-        let _latency = self.metrics.track_grpc_latency();
-        tracing::debug!(rpc = "MemoryService.ListEvents");
+        let _request = self.observe_request("MemoryService.ListEvents");
         let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let request = request.into_inner();
         require_owned_session(self.store.as_ref(), &request.session_id, &user_id)
@@ -111,9 +120,7 @@ impl memory_service_server::MemoryService for HarpeGrpc {
         &self,
         request: Request<ListWorldFactsRequest>,
     ) -> std::result::Result<Response<pb::ListWorldFactsResponse>, Status> {
-        self.metrics.record_grpc_request();
-        let _latency = self.metrics.track_grpc_latency();
-        tracing::debug!(rpc = "MemoryService.ListWorldFacts");
+        let _request = self.observe_request("MemoryService.ListWorldFacts");
         let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let request = request.into_inner();
         require_owned_game(self.store.as_ref(), &request.game_id, &user_id)
@@ -139,9 +146,7 @@ impl memory_service_server::MemoryService for HarpeGrpc {
         &self,
         request: Request<ListLocationsRequest>,
     ) -> std::result::Result<Response<pb::ListLocationsResponse>, Status> {
-        self.metrics.record_grpc_request();
-        let _latency = self.metrics.track_grpc_latency();
-        tracing::debug!(rpc = "MemoryService.ListLocations");
+        let _request = self.observe_request("MemoryService.ListLocations");
         let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let request = request.into_inner();
         require_owned_game(self.store.as_ref(), &request.game_id, &user_id)
@@ -169,9 +174,7 @@ impl memory_service_server::MemoryService for HarpeGrpc {
         &self,
         request: Request<SearchMemoryRequest>,
     ) -> std::result::Result<Response<pb::SearchMemoryResponse>, Status> {
-        self.metrics.record_grpc_request();
-        let _latency = self.metrics.track_grpc_latency();
-        tracing::debug!(rpc = "MemoryService.SearchMemory");
+        let _request = self.observe_request("MemoryService.SearchMemory");
         let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let request = request.into_inner();
         require_owned_session(self.store.as_ref(), &request.session_id, &user_id)
@@ -204,9 +207,7 @@ impl memory_service_server::MemoryService for HarpeGrpc {
         &self,
         request: Request<ExportGameRequest>,
     ) -> std::result::Result<Response<pb::GameSnapshot>, Status> {
-        self.metrics.record_grpc_request();
-        let _latency = self.metrics.track_grpc_latency();
-        tracing::debug!(rpc = "MemoryService.ExportGame");
+        let _request = self.observe_request("MemoryService.ExportGame");
         let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let request = request.into_inner();
         require_owned_game(self.store.as_ref(), &request.game_id, &user_id)
@@ -225,9 +226,7 @@ impl memory_service_server::MemoryService for HarpeGrpc {
         &self,
         request: Request<ExportGameRequest>,
     ) -> std::result::Result<Response<Self::ExportGameStreamStream>, Status> {
-        self.metrics.record_grpc_request();
-        let _latency = self.metrics.track_grpc_latency();
-        tracing::debug!(rpc = "MemoryService.ExportGameStream");
+        let _request = self.observe_request("MemoryService.ExportGameStream");
         let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let request = request.into_inner();
         let game = require_owned_game(self.store.as_ref(), &request.game_id, &user_id)

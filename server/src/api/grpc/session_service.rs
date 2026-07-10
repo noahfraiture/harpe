@@ -1,4 +1,21 @@
-use super::*;
+use std::sync::Arc;
+
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
+use tonic::{Request, Response, Status};
+
+use crate::HarpeError;
+use crate::domain::NewSession;
+use crate::pb::{
+    self, CreateSessionRequest, GetSessionRequest, ListMessagesRequest, ListSessionsRequest,
+    MessageDelta, PreviewContextRequest, SendMessageRequest, session_service_server,
+};
+
+use super::HarpeGrpc;
+use super::convert::{message_to_pb, preview_context_to_pb, session_to_pb, status_from_error};
+use super::ownership::{require_owned_game, require_owned_session, require_user_id};
+use super::pagination::{page_info, request_limit};
+use super::{build_context_for_turn, run_send_message};
 
 #[tonic::async_trait]
 impl session_service_server::SessionService for HarpeGrpc {
@@ -8,9 +25,7 @@ impl session_service_server::SessionService for HarpeGrpc {
         &self,
         request: Request<CreateSessionRequest>,
     ) -> std::result::Result<Response<pb::Session>, Status> {
-        self.metrics.record_grpc_request();
-        let _latency = self.metrics.track_grpc_latency();
-        tracing::debug!(rpc = "SessionService.CreateSession");
+        let _request = self.observe_request("SessionService.CreateSession");
         let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let request = request.into_inner();
         require_owned_game(self.store.as_ref(), &request.game_id, &user_id)
@@ -32,9 +47,7 @@ impl session_service_server::SessionService for HarpeGrpc {
         &self,
         request: Request<ListSessionsRequest>,
     ) -> std::result::Result<Response<pb::ListSessionsResponse>, Status> {
-        self.metrics.record_grpc_request();
-        let _latency = self.metrics.track_grpc_latency();
-        tracing::debug!(rpc = "SessionService.ListSessions");
+        let _request = self.observe_request("SessionService.ListSessions");
         let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let request = request.into_inner();
         require_owned_game(self.store.as_ref(), &request.game_id, &user_id)
@@ -60,9 +73,7 @@ impl session_service_server::SessionService for HarpeGrpc {
         &self,
         request: Request<GetSessionRequest>,
     ) -> std::result::Result<Response<pb::Session>, Status> {
-        self.metrics.record_grpc_request();
-        let _latency = self.metrics.track_grpc_latency();
-        tracing::debug!(rpc = "SessionService.GetSession");
+        let _request = self.observe_request("SessionService.GetSession");
         let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let session_id = request.into_inner().session_id;
         let session = require_owned_session(self.store.as_ref(), &session_id, &user_id)
@@ -76,9 +87,7 @@ impl session_service_server::SessionService for HarpeGrpc {
         &self,
         request: Request<SendMessageRequest>,
     ) -> std::result::Result<Response<Self::SendMessageStream>, Status> {
-        self.metrics.record_grpc_request();
-        let _latency = self.metrics.track_grpc_latency();
-        tracing::debug!(rpc = "SessionService.SendMessage");
+        let _request = self.observe_request("SessionService.SendMessage");
         let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let request = request.into_inner();
         let store = Arc::clone(&self.store);
@@ -111,9 +120,7 @@ impl session_service_server::SessionService for HarpeGrpc {
         &self,
         request: Request<PreviewContextRequest>,
     ) -> std::result::Result<Response<pb::PreviewContextResponse>, Status> {
-        self.metrics.record_grpc_request();
-        let _latency = self.metrics.track_grpc_latency();
-        tracing::debug!(rpc = "SessionService.PreviewContext");
+        let _request = self.observe_request("SessionService.PreviewContext");
         let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let request = request.into_inner();
         if request.content.trim().is_empty() {
@@ -150,9 +157,7 @@ impl session_service_server::SessionService for HarpeGrpc {
         &self,
         request: Request<ListMessagesRequest>,
     ) -> std::result::Result<Response<pb::ListMessagesResponse>, Status> {
-        self.metrics.record_grpc_request();
-        let _latency = self.metrics.track_grpc_latency();
-        tracing::debug!(rpc = "SessionService.ListMessages");
+        let _request = self.observe_request("SessionService.ListMessages");
         let user_id = require_user_id(request.metadata()).map_err(status_from_error)?;
         let request = request.into_inner();
         require_owned_session(self.store.as_ref(), &request.session_id, &user_id)

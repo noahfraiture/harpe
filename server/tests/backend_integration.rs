@@ -1009,6 +1009,108 @@ async fn memory_update_ignores_blank_extracted_items_without_creating_records() 
 }
 
 #[tokio::test]
+async fn memory_update_coalesces_duplicate_entities_from_one_extraction() {
+    let store = test_store().await;
+    let user = store
+        .create_user(NewUser {
+            display_name: "Noah".to_owned(),
+        })
+        .await
+        .unwrap();
+    let game = store
+        .create_game(NewGame {
+            owner_user_id: user.id,
+            title: "Duplicate Memory Coast".to_owned(),
+            system_prompt: String::new(),
+        })
+        .await
+        .unwrap();
+    let session = store
+        .create_session(NewSession {
+            game_id: game.id.clone(),
+            title: "Duplicate extraction session".to_owned(),
+        })
+        .await
+        .unwrap();
+    store
+        .append_message(NewMessage {
+            id: None,
+            session_id: session.id.clone(),
+            role: MessageRole::Assistant,
+            content: "Mira reaches the sea gate.".to_owned(),
+        })
+        .await
+        .unwrap();
+
+    let llm = EchoLlm::new(Vec::new()).with_extraction(MemoryExtraction {
+        character_updates: vec![
+            ExtractedCharacterUpdate {
+                name: "Mira".to_owned(),
+                description: "A harbor scout".to_owned(),
+                status: "watching".to_owned(),
+            },
+            ExtractedCharacterUpdate {
+                name: " mira ".to_owned(),
+                description: "A harbor scout at the gate".to_owned(),
+                status: "alert".to_owned(),
+            },
+        ],
+        world_facts: vec![
+            ExtractedWorldFact {
+                subject: "Mira".to_owned(),
+                predicate: "guards".to_owned(),
+                object: "Sea Gate".to_owned(),
+                content: "Mira guards the sea gate.".to_owned(),
+                confidence: 0.7,
+            },
+            ExtractedWorldFact {
+                subject: " mira ".to_owned(),
+                predicate: "GUARDS".to_owned(),
+                object: "sea gate".to_owned(),
+                content: "Mira now guards the sea gate.".to_owned(),
+                confidence: 0.9,
+            },
+        ],
+        locations: vec![
+            ExtractedLocation {
+                name: "Sea Gate".to_owned(),
+                description: "The harbor entrance".to_owned(),
+            },
+            ExtractedLocation {
+                name: " sea gate ".to_owned(),
+                description: "The fortified harbor entrance".to_owned(),
+            },
+        ],
+        ..MemoryExtraction::default()
+    });
+
+    update_memory_after_turn(
+        &session,
+        &game.id,
+        "Mira reaches the sea gate.",
+        &store,
+        &llm,
+    )
+    .await
+    .unwrap();
+
+    let characters = store.list_characters(&game.id).await.unwrap();
+    assert_eq!(characters.len(), 1);
+    assert_eq!(characters[0].status, "alert");
+
+    let facts = store.list_world_facts(&game.id, 10).await.unwrap();
+    assert_eq!(facts.len(), 1);
+    assert_eq!(facts[0].content, "Mira now guards the sea gate.");
+
+    let locations = store.list_locations(&game.id).await.unwrap();
+    assert_eq!(locations.len(), 1);
+    assert_eq!(locations[0].description, "The fortified harbor entrance");
+
+    let chunks = store.list_memory_chunks(&session.id, 10).await.unwrap();
+    assert_eq!(chunks.len(), 4);
+}
+
+#[tokio::test]
 async fn grpc_send_message_stream_reports_validation_and_empty_assistant_errors() {
     let store = Arc::new(test_store().await);
     let metrics = AppMetrics::shared();

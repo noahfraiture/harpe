@@ -1,4 +1,14 @@
-use super::*;
+use std::io::Write;
+
+use harpe_proto::pb::{
+    CreateGameRequest, GetGameRequest, ListGamesRequest, game_service_client::GameServiceClient,
+};
+use serde_json::json;
+use tonic::transport::Channel;
+
+use crate::config::read_prompt;
+use crate::output::{game_json, page_json, write_game, write_json};
+use crate::{CliResult, GameArgs, GameCommand, with_user};
 
 pub(crate) async fn game<W: Write>(
     channel: Channel,

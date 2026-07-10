@@ -1,4 +1,9 @@
-use super::*;
+use std::io::Write;
+use std::path::Path;
+
+use crate::config::{DEFAULT_ADDR, required_value, save_config_to_path};
+use crate::output::{config_json, write_json};
+use crate::{CliResult, ClientConfig, ConfigArgs, ConfigCommand, ConfigKey};
 
 pub(crate) fn config<W: Write>(
     args: ConfigArgs,

@@ -18,12 +18,10 @@ pub use args::{
     MetricsArgs, MetricsCommand, PageArgs, PlayArgs, SessionArgs, SessionCommand, UserArgs,
     UserCommand, join_words,
 };
-#[cfg(test)]
-use commands::normalize_optional_model;
 use commands::{admin, backup, config, game, health, memory, metrics, play, session, user};
 pub use config::{ClientConfig, normalize_addr};
 #[cfg(test)]
-use config::{DEFAULT_CONFIG_FILE, LEGACY_CONFIG_FILE, read_prompt};
+use config::{DEFAULT_CONFIG_FILE, LEGACY_CONFIG_FILE, normalize_optional_model, read_prompt};
 use config::{
     config_path, invalid_input, load_config_from_path, required_user_id, resolve_addr,
     resolve_user_id, save_config_to_path,

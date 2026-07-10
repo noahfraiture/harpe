@@ -104,7 +104,10 @@ async fn persist_extraction(
     }
 
     let existing_characters = store.list_characters(game_id).await?;
-    for character in extraction.character_updates {
+    let character_updates = coalesce_updates(extraction.character_updates, |left, right| {
+        same_name(&left.name, &right.name)
+    });
+    for character in character_updates {
         if character.name.trim().is_empty() {
             continue;
         }
@@ -137,7 +140,12 @@ async fn persist_extraction(
     }
 
     let existing_facts = store.list_world_facts(game_id, 100).await?;
-    for fact in extraction.world_facts {
+    let world_facts = coalesce_updates(extraction.world_facts, |left, right| {
+        same_name(&left.subject, &right.subject)
+            && same_name(&left.predicate, &right.predicate)
+            && same_name(&left.object, &right.object)
+    });
+    for fact in world_facts {
         if fact.subject.trim().is_empty()
             || fact.predicate.trim().is_empty()
             || fact.object.trim().is_empty()
@@ -172,7 +180,10 @@ async fn persist_extraction(
     }
 
     let existing_locations = store.list_locations(game_id).await?;
-    for location in extraction.locations {
+    let locations = coalesce_updates(extraction.locations, |left, right| {
+        same_name(&left.name, &right.name)
+    });
+    for location in locations {
         if location.name.trim().is_empty() {
             continue;
         }
@@ -211,6 +222,20 @@ async fn persist_extraction(
     .await?;
 
     Ok(())
+}
+
+fn coalesce_updates<T>(updates: Vec<T>, same_entity: impl Fn(&T, &T) -> bool) -> Vec<T> {
+    updates.into_iter().fold(Vec::new(), |mut unique, update| {
+        if let Some(existing) = unique
+            .iter_mut()
+            .find(|existing| same_entity(existing, &update))
+        {
+            *existing = update;
+        } else {
+            unique.push(update);
+        }
+        unique
+    })
 }
 
 async fn save_embedded_memory(

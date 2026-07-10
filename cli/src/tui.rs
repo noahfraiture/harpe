@@ -18,11 +18,10 @@ use tonic::transport::Endpoint;
 use tui_textarea::{Input, Key};
 
 use crate::{
-    CliResult, ClientConfig, config_path, load_config_from_path, normalize_addr, required_user_id,
+    CliResult, ClientConfig, config_path, load_config_from_path, required_user_id, resolve_addr,
     save_config_to_path,
 };
 
-const DEFAULT_ADDR: &str = "http://[::1]:50051";
 const TICK_RATE: Duration = Duration::from_millis(80);
 const HEALTH_INTERVAL: Duration = Duration::from_secs(8);
 mod client;
@@ -57,7 +56,7 @@ pub struct TuiArgs {
 pub async fn run(args: TuiArgs) -> CliResult<()> {
     let config_path = config_path(args.config.as_deref())?;
     let mut client_config = load_config_from_path(&config_path)?;
-    let addr = resolve_tui_addr(args.addr.as_deref(), &client_config)?;
+    let addr = resolve_addr(args.addr.as_deref(), &client_config)?;
     let user_id = required_user_id(args.user_id.as_deref().or(client_config.user_id.as_deref()))?;
     let channel = Endpoint::from_shared(addr.clone())?.connect().await?;
     let client = TuiClient::new(channel, user_id.clone());
@@ -142,10 +141,6 @@ pub async fn run(args: TuiArgs) -> CliResult<()> {
     Ok(())
 }
 
-fn resolve_tui_addr(cli_addr: Option<&str>, config: &ClientConfig) -> CliResult<String> {
-    normalize_addr(cli_addr.or(config.addr.as_deref()).unwrap_or(DEFAULT_ADDR))
-}
-
 struct TerminalGuard {
     terminal: Terminal<CrosstermBackend<Stdout>>,
 }
@@ -154,9 +149,18 @@ impl TerminalGuard {
     fn enter() -> io::Result<Self> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+        if let Err(error) = execute!(stdout, EnterAlternateScreen, EnableMouseCapture) {
+            restore_terminal();
+            return Err(error);
+        }
         let backend = CrosstermBackend::new(stdout);
-        let terminal = Terminal::new(backend)?;
+        let terminal = match Terminal::new(backend) {
+            Ok(terminal) => terminal,
+            Err(error) => {
+                restore_terminal();
+                return Err(error);
+            }
+        };
         Ok(Self { terminal })
     }
 
@@ -178,6 +182,11 @@ impl Drop for TerminalGuard {
         );
         let _ = self.terminal.show_cursor();
     }
+}
+
+fn restore_terminal() {
+    let _ = disable_raw_mode();
+    let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
 }
 
 async fn handle_key(
@@ -426,18 +435,63 @@ async fn refresh_active_data(client: &TuiClient, app: &mut App) -> CliResult<()>
     let session_id = session.id.clone();
     let game_id = session.game_id.clone();
 
-    app.messages = client
-        .list_messages(session_id.clone())
-        .await
-        .unwrap_or_default();
-    app.summary = client.summary(session_id.clone()).await.ok();
-    app.characters = client.characters(game_id.clone()).await.unwrap_or_default();
-    app.events = client.events(session_id).await.unwrap_or_default();
-    app.facts = client.facts(game_id.clone()).await.unwrap_or_default();
-    app.locations = client.locations(game_id).await.unwrap_or_default();
-    app.health = client.health().await.ok();
-    app.set_status("refreshed");
+    let mut errors = Vec::new();
+    update_panel(
+        &mut app.messages,
+        client.list_messages(session_id.clone()).await,
+        "messages",
+        &mut errors,
+    );
+    update_panel(
+        &mut app.summary,
+        client.summary(session_id.clone()).await,
+        "summary",
+        &mut errors,
+    );
+    update_panel(
+        &mut app.characters,
+        client.characters(game_id.clone()).await,
+        "characters",
+        &mut errors,
+    );
+    update_panel(
+        &mut app.events,
+        client.events(session_id).await,
+        "events",
+        &mut errors,
+    );
+    update_panel(
+        &mut app.facts,
+        client.facts(game_id.clone()).await,
+        "world facts",
+        &mut errors,
+    );
+    update_panel(
+        &mut app.locations,
+        client.locations(game_id).await,
+        "locations",
+        &mut errors,
+    );
+    update_panel(
+        &mut app.health,
+        client.health().await.map(Some),
+        "health",
+        &mut errors,
+    );
+
+    if errors.is_empty() {
+        app.set_status("refreshed");
+    } else {
+        app.set_error(format!("refresh incomplete: {}", errors.join("; ")));
+    }
     Ok(())
+}
+
+fn update_panel<T>(target: &mut T, result: CliResult<T>, label: &str, errors: &mut Vec<String>) {
+    match result {
+        Ok(value) => *target = value,
+        Err(error) => errors.push(format!("{label}: {error}")),
+    }
 }
 
 async fn preview_context(client: &TuiClient, app: &mut App) -> CliResult<()> {
@@ -531,6 +585,21 @@ mod tests {
     fn right_tabs_cycle_in_stable_order() {
         assert_eq!(RightTab::Cast.next(), RightTab::Lore);
         assert_eq!(RightTab::Context.next(), RightTab::Cast);
+    }
+
+    #[test]
+    fn panel_refresh_preserves_previous_data_and_reports_failures() {
+        let mut value = 1;
+        let mut errors = Vec::new();
+
+        update_panel(&mut value, Ok(2), "test panel", &mut errors);
+        assert_eq!(value, 2);
+        assert!(errors.is_empty());
+
+        let failure = std::io::Error::other("temporarily unavailable").into();
+        update_panel(&mut value, Err(failure), "test panel", &mut errors);
+        assert_eq!(value, 2);
+        assert_eq!(errors, ["test panel: temporarily unavailable"]);
     }
 
     #[test]

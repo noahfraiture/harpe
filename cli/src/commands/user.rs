@@ -1,4 +1,10 @@
-use super::*;
+use std::io::Write;
+
+use harpe_proto::pb::{CreateUserRequest, GetUserRequest, user_service_client::UserServiceClient};
+use tonic::transport::Channel;
+
+use crate::output::write_user;
+use crate::{CliResult, UserArgs, UserCommand};
 
 pub(crate) async fn user<W: Write>(
     channel: Channel,

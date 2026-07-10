@@ -4,27 +4,14 @@ use chrono::Utc;
 use futures_util::StreamExt;
 use serde::Serialize;
 use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
-use tonic::{Request, Response, Status};
+use tonic::Status;
 
-use crate::domain::{
-    Game, Message, MessageRole, NewGame, NewMessage, NewSession, NewUser, Session, new_id,
-};
+use crate::domain::{Game, Message, MessageRole, NewMessage, Session, new_id};
 use crate::engine::{ContextBuilder, ContextInputs};
 use crate::jobs::{UpdateMemoryAfterTurnPayload, new_update_memory_job};
 use crate::llm::{ChatRequest, LlmClient};
-use crate::observability::{AppMetrics, SharedMetrics};
-use crate::pb::{
-    self, CreateGameRequest, CreateSessionRequest, CreateUserRequest, ExportGameRequest,
-    ExportMetricsRequest, GetCharacterRequest, GetGameRequest, GetMetricsRequest,
-    GetSessionRequest, GetStorySummaryRequest, GetUserRequest, HealthCheckRequest,
-    ListBackgroundJobsRequest, ListCharactersRequest, ListEventsRequest, ListGamesRequest,
-    ListLocationsRequest, ListMemoryChunksRequest, ListMessagesRequest, ListSessionsRequest,
-    ListWorldFactsRequest, MessageDelta, PreviewContextRequest, PurgeBackgroundJobRequest,
-    RetryBackgroundJobRequest, SearchMemoryRequest, SendMessageRequest, admin_service_server,
-    game_service_server, health_service_server, memory_service_server, metrics_service_server,
-    session_service_server, user_service_server,
-};
+use crate::observability::{AppMetrics, LatencyGuard, SharedMetrics};
+use crate::pb::{self, MessageDelta, SendMessageRequest};
 use crate::store::HarpeStore;
 use crate::{HarpeError, Result};
 
@@ -40,13 +27,7 @@ mod pagination;
 mod session_service;
 mod user_service;
 
-use convert::*;
-use health::{health_response, normalize_health_service};
-use ownership::{
-    optional_user_id, require_owned_game, require_owned_session, require_user_id,
-    resolve_owner_user_id,
-};
-use pagination::{page_info, request_limit, truncate_to_limit};
+use ownership::require_owned_session;
 
 #[derive(Clone)]
 pub struct HarpeGrpc {
@@ -74,6 +55,12 @@ impl HarpeGrpc {
     pub fn with_metrics(mut self, metrics: SharedMetrics) -> Self {
         self.metrics = metrics;
         self
+    }
+
+    fn observe_request(&self, rpc: &'static str) -> LatencyGuard<'_> {
+        self.metrics.record_grpc_request();
+        tracing::debug!(rpc);
+        self.metrics.track_grpc_latency()
     }
 }
 
@@ -313,11 +300,21 @@ async fn send_backup_chunk<T: Serialize>(
 
 #[cfg(test)]
 mod tests {
+    use tonic::Request;
     use uuid::Uuid;
 
     use crate::db::surreal::SurrealStore;
     use crate::domain::{JobKind, JobStatus, NewBackgroundJob};
     use crate::llm::{ChatMessage, EchoLlm};
+    use crate::pb::{ExportMetricsRequest, GetMetricsRequest, metrics_service_server};
+
+    use super::convert::{
+        admin_job_status_filter, admin_job_status_to_pb, metrics_to_pb, preview_context_to_pb,
+        status_from_error,
+    };
+    use super::health::{health_response, normalize_health_service};
+    use super::ownership::resolve_owner_user_id;
+    use super::pagination::{page_info, request_limit, truncate_to_limit};
 
     use super::*;
 

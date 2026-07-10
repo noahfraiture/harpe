@@ -1,4 +1,10 @@
-use super::*;
+use tonic::{Request, Response, Status};
+
+use crate::domain::NewUser;
+use crate::pb::{self, CreateUserRequest, GetUserRequest, user_service_server};
+
+use super::HarpeGrpc;
+use super::convert::{status_from_error, user_to_pb};
 
 #[tonic::async_trait]
 impl user_service_server::UserService for HarpeGrpc {
@@ -6,9 +12,7 @@ impl user_service_server::UserService for HarpeGrpc {
         &self,
         request: Request<CreateUserRequest>,
     ) -> std::result::Result<Response<pb::User>, Status> {
-        self.metrics.record_grpc_request();
-        let _latency = self.metrics.track_grpc_latency();
-        tracing::debug!(rpc = "UserService.CreateUser");
+        let _request = self.observe_request("UserService.CreateUser");
         let request = request.into_inner();
         let user = self
             .store
@@ -25,9 +29,7 @@ impl user_service_server::UserService for HarpeGrpc {
         &self,
         request: Request<GetUserRequest>,
     ) -> std::result::Result<Response<pb::User>, Status> {
-        self.metrics.record_grpc_request();
-        let _latency = self.metrics.track_grpc_latency();
-        tracing::debug!(rpc = "UserService.GetUser");
+        let _request = self.observe_request("UserService.GetUser");
         let user = self
             .store
             .get_user(&request.into_inner().user_id)

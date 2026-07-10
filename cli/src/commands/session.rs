@@ -1,4 +1,19 @@
-use super::*;
+use std::io::Write;
+
+use futures_util::StreamExt;
+use harpe_proto::pb::{
+    CreateSessionRequest, GetSessionRequest, ListMessagesRequest, ListSessionsRequest,
+    PreviewContextRequest, SendMessageRequest, session_service_client::SessionServiceClient,
+};
+use serde_json::json;
+use tonic::transport::Channel;
+
+use crate::config::{normalize_optional_model, required_config_value};
+use crate::output::{
+    context_message_json, delta_json, message_json, page_json, role_name, session_json, write_json,
+    write_session,
+};
+use crate::{CliResult, ClientConfig, SessionArgs, SessionCommand, join_words, with_user};
 
 pub(crate) async fn session<W: Write>(
     channel: Channel,
@@ -175,9 +190,11 @@ pub(super) async fn send_message<W: Write>(
         .into_inner();
     let mut deltas = Vec::new();
     let mut full_response = String::new();
+    let mut completed = false;
 
     while let Some(next) = stream.next().await {
         let delta = next?;
+        completed |= delta.done;
         if as_json {
             full_response.push_str(&delta.delta);
             deltas.push(delta_json(&delta));
@@ -185,6 +202,17 @@ pub(super) async fn send_message<W: Write>(
             write!(writer, "{}", delta.delta)?;
             writer.flush()?;
         }
+        if delta.done {
+            break;
+        }
+    }
+
+    if !completed {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "message stream ended before its completion marker",
+        )
+        .into());
     }
 
     if as_json {

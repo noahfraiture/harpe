@@ -1,4 +1,17 @@
-use super::*;
+use tonic::{Request, Response, Status};
+
+use crate::HarpeError;
+use crate::pb::{
+    self, ListBackgroundJobsRequest, ListMemoryChunksRequest, PurgeBackgroundJobRequest,
+    RetryBackgroundJobRequest, admin_service_server,
+};
+
+use super::HarpeGrpc;
+use super::convert::{
+    admin_job_status_filter, background_job_to_pb, memory_chunk_to_pb, status_from_error,
+    validate_job_id,
+};
+use super::pagination::{page_info, request_limit};
 
 #[tonic::async_trait]
 impl admin_service_server::AdminService for HarpeGrpc {
@@ -6,9 +19,7 @@ impl admin_service_server::AdminService for HarpeGrpc {
         &self,
         request: Request<ListBackgroundJobsRequest>,
     ) -> std::result::Result<Response<pb::ListBackgroundJobsResponse>, Status> {
-        self.metrics.record_grpc_request();
-        let _latency = self.metrics.track_grpc_latency();
-        tracing::debug!(rpc = "AdminService.ListBackgroundJobs");
+        let _request = self.observe_request("AdminService.ListBackgroundJobs");
         let request = request.into_inner();
         let status = admin_job_status_filter(request.status).map_err(status_from_error)?;
         let jobs = self
@@ -28,9 +39,7 @@ impl admin_service_server::AdminService for HarpeGrpc {
         &self,
         request: Request<RetryBackgroundJobRequest>,
     ) -> std::result::Result<Response<pb::BackgroundJobDebug>, Status> {
-        self.metrics.record_grpc_request();
-        let _latency = self.metrics.track_grpc_latency();
-        tracing::debug!(rpc = "AdminService.RetryBackgroundJob");
+        let _request = self.observe_request("AdminService.RetryBackgroundJob");
         let request = request.into_inner();
         validate_job_id(&request.job_id).map_err(status_from_error)?;
         let max_attempts = (request.max_attempts > 0).then_some(request.max_attempts);
@@ -47,9 +56,7 @@ impl admin_service_server::AdminService for HarpeGrpc {
         &self,
         request: Request<PurgeBackgroundJobRequest>,
     ) -> std::result::Result<Response<pb::BackgroundJobDebug>, Status> {
-        self.metrics.record_grpc_request();
-        let _latency = self.metrics.track_grpc_latency();
-        tracing::debug!(rpc = "AdminService.PurgeBackgroundJob");
+        let _request = self.observe_request("AdminService.PurgeBackgroundJob");
         let request = request.into_inner();
         validate_job_id(&request.job_id).map_err(status_from_error)?;
         let job = self
@@ -65,9 +72,7 @@ impl admin_service_server::AdminService for HarpeGrpc {
         &self,
         request: Request<ListMemoryChunksRequest>,
     ) -> std::result::Result<Response<pb::ListMemoryChunksResponse>, Status> {
-        self.metrics.record_grpc_request();
-        let _latency = self.metrics.track_grpc_latency();
-        tracing::debug!(rpc = "AdminService.ListMemoryChunks");
+        let _request = self.observe_request("AdminService.ListMemoryChunks");
         let request = request.into_inner();
         if request.session_id.trim().is_empty() {
             return Err(status_from_error(HarpeError::Validation(

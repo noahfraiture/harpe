@@ -1,4 +1,23 @@
-use super::*;
+use std::io::{BufRead, Write};
+
+use harpe_proto::pb::{
+    GetSessionRequest, GetStorySummaryRequest, ListCharactersRequest, ListEventsRequest,
+    PreviewContextRequest, SearchMemoryRequest, memory_service_client::MemoryServiceClient,
+    session_service_client::SessionServiceClient,
+};
+use tonic::transport::Channel;
+
+use crate::config::{required_config_value, required_value};
+use crate::output::role_name;
+use crate::{CliResult, ClientConfig, PlayArgs, invalid_input, with_user};
+
+fn write_play_help<W: Write>(writer: &mut W) -> CliResult<()> {
+    writeln!(
+        writer,
+        "commands: /context <message>, /summary, /characters, /events, /memory <query>, /help, /quit"
+    )?;
+    Ok(())
+}
 
 pub(crate) async fn play<R: BufRead, W: Write>(
     channel: Channel,
