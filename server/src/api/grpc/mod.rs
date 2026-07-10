@@ -313,8 +313,11 @@ async fn send_backup_chunk<T: Serialize>(
 
 #[cfg(test)]
 mod tests {
-    use crate::domain::JobStatus;
-    use crate::llm::ChatMessage;
+    use uuid::Uuid;
+
+    use crate::db::surreal::SurrealStore;
+    use crate::domain::{JobKind, JobStatus, NewBackgroundJob};
+    use crate::llm::{ChatMessage, EchoLlm};
 
     use super::*;
 
@@ -491,5 +494,84 @@ mod tests {
         assert_eq!(response.jobs_retried, 1);
         assert!(!response.grpc_latency_buckets.is_empty());
         assert!(!response.collected_at.is_empty());
+    }
+
+    #[tokio::test]
+    async fn metrics_service_returns_snapshots_and_prometheus_text() {
+        let service = test_grpc_service().await;
+
+        let snapshot = metrics_service_server::MetricsService::get_metrics(
+            &service,
+            Request::new(GetMetricsRequest {}),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(snapshot.grpc_requests, 1);
+
+        let exported = metrics_service_server::MetricsService::export_metrics(
+            &service,
+            Request::new(ExportMetricsRequest {
+                format: pb::MetricsExportFormat::PrometheusText as i32,
+            }),
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(
+            exported.content_type,
+            "text/plain; version=0.0.4; charset=utf-8"
+        );
+        assert!(exported.body.contains("harpe_grpc_requests_total 2"));
+
+        let error = metrics_service_server::MetricsService::export_metrics(
+            &service,
+            Request::new(ExportMetricsRequest { format: 99 }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn health_response_reports_failed_jobs_as_degraded() {
+        let store = test_store().await;
+        store
+            .enqueue_job(NewBackgroundJob {
+                kind: JobKind::UpdateMemoryAfterTurn,
+                payload: serde_json::json!({}),
+                max_attempts: 1,
+                run_after: None,
+            })
+            .await
+            .unwrap();
+        let job = store.claim_next_job().await.unwrap().unwrap();
+        store
+            .fail_job(&job.id, "permanent failure".to_owned())
+            .await
+            .unwrap();
+
+        let response = health_response(store.as_ref(), "harpe.v1".to_owned()).await;
+
+        assert_eq!(response.status, pb::ServingStatus::Degraded as i32);
+        assert!(response.database_ok);
+        assert_eq!(response.pending_jobs, 0);
+        assert_eq!(response.failed_jobs, 1);
+    }
+
+    async fn test_grpc_service() -> HarpeGrpc {
+        HarpeGrpc::new(test_store().await, Arc::new(EchoLlm::development_default()))
+    }
+
+    async fn test_store() -> Arc<SurrealStore> {
+        Arc::new(
+            SurrealStore::connect(
+                "memory",
+                &format!("grpc_unit_test_{}", Uuid::now_v7()),
+                "harpe",
+            )
+            .await
+            .unwrap(),
+        )
     }
 }

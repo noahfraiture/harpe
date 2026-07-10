@@ -25,6 +25,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn echo_llm_narrates_the_latest_user_action_when_chunks_are_empty() {
+        let llm = EchoLlm::new(vec![]);
+        let mut stream = llm
+            .stream_chat(ChatRequest {
+                messages: vec![
+                    ChatMessage {
+                        role: MessageRole::User,
+                        content: "I inspect the gate.".to_owned(),
+                    },
+                    ChatMessage {
+                        role: MessageRole::Assistant,
+                        content: "The gate is rusted.".to_owned(),
+                    },
+                ],
+                model: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            stream.next().await.unwrap().unwrap(),
+            "Narrator: I inspect the gate."
+        );
+        assert!(stream.next().await.is_none());
+
+        let mut no_user_stream = llm
+            .stream_chat(ChatRequest {
+                messages: vec![],
+                model: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            no_user_stream.next().await.unwrap().unwrap(),
+            "Narrator: the player acts"
+        );
+    }
+
+    #[tokio::test]
     async fn echo_llm_embedding_is_stable_and_normalized() {
         let llm = EchoLlm::development_default();
 

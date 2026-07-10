@@ -260,6 +260,84 @@ mod tests {
     }
 
     #[test]
+    fn context_budget_supports_explicit_windows_and_model_family_fallbacks() {
+        let default = ContextBudget::default();
+        assert_eq!(ContextBudget::for_model("   "), default);
+        assert_eq!(ContextBudget::for_model("unknown-model"), default);
+
+        for (model, expected_tokens) in [
+            ("custom-1000k", 1_000_000),
+            ("custom-1m", 1_000_000),
+            ("custom-128k", 128_000),
+            ("custom-64k", 64_000),
+            ("custom-32k", 32_000),
+            ("custom-16k", 16_000),
+            ("custom-4k", 4_000),
+            ("claude-opus", 200_000),
+            ("gpt-4.1", 1_000_000),
+            ("gpt-4o", 128_000),
+            ("o3-mini", 128_000),
+            ("o4-mini", 128_000),
+            ("gpt-3.5", 32_000),
+        ] {
+            assert_eq!(
+                ContextBudget::for_model(model).max_context_tokens,
+                expected_tokens,
+                "unexpected context window for {model}"
+            );
+        }
+
+        assert_eq!(
+            ContextBudget::for_model("custom-4k").reserved_response_tokens,
+            1_000
+        );
+        assert_eq!(
+            ContextBudget::for_model("custom-1m").reserved_response_tokens,
+            8_000
+        );
+        assert_eq!(
+            ContextBudget {
+                max_context_tokens: 1_000,
+                reserved_response_tokens: 2_000,
+            }
+            .max_prompt_tokens(),
+            0
+        );
+    }
+
+    #[test]
+    fn tokenizer_profiles_cover_all_supported_model_families() {
+        assert_eq!(
+            TokenizerProfile::for_model("claude-opus"),
+            TokenizerProfile::Anthropic
+        );
+        assert_eq!(
+            TokenizerProfile::for_model("mixtral-8x7b"),
+            TokenizerProfile::Mistral
+        );
+        assert_eq!(
+            TokenizerProfile::for_model("o3-mini"),
+            TokenizerProfile::OpenAi
+        );
+        assert_eq!(
+            TokenizerProfile::for_model("unknown-model"),
+            TokenizerProfile::Generic
+        );
+
+        let content = "Mira says: ouvre la porte!";
+        assert!(
+            TokenEstimator {
+                profile: TokenizerProfile::Mistral,
+            }
+            .estimate(content)
+                >= TokenEstimator {
+                    profile: TokenizerProfile::Anthropic,
+                }
+                .estimate(content)
+        );
+    }
+
+    #[test]
     fn trusted_prompt_and_entity_formatters_keep_state_readable() {
         let now = Utc::now();
 
