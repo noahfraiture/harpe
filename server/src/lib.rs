@@ -9,6 +9,7 @@ pub mod llm;
 pub mod observability;
 pub mod runtime;
 pub mod store;
+pub mod telemetry;
 
 pub use harpe_proto::pb;
 

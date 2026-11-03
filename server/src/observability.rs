@@ -3,12 +3,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
+use opentelemetry::{
+    global,
+    metrics::{Counter, Histogram, Meter},
+};
 
 const GRPC_LATENCY_BUCKET_MS: [u64; 11] =
     [5, 10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000];
 
 #[derive(Debug)]
 pub struct AppMetrics {
+    telemetry: TelemetryMetrics,
     grpc_requests: AtomicU64,
     grpc_failures: AtomicU64,
     streamed_messages: AtomicU64,
@@ -24,7 +29,53 @@ pub struct AppMetrics {
 
 impl Default for AppMetrics {
     fn default() -> Self {
+        Self::with_meter(global::meter("harpe-server"))
+    }
+}
+
+#[derive(Debug)]
+struct TelemetryMetrics {
+    grpc_requests: Counter<u64>,
+    grpc_failures: Counter<u64>,
+    streamed_messages: Counter<u64>,
+    jobs_processed: Counter<u64>,
+    jobs_succeeded: Counter<u64>,
+    jobs_retried: Counter<u64>,
+    jobs_failed: Counter<u64>,
+    health_checks: Counter<u64>,
+    grpc_latency: Histogram<f64>,
+}
+
+impl TelemetryMetrics {
+    fn new(meter: &Meter) -> Self {
         Self {
+            grpc_requests: meter.u64_counter("harpe.grpc.requests").build(),
+            grpc_failures: meter.u64_counter("harpe.grpc.failures").build(),
+            streamed_messages: meter.u64_counter("harpe.streamed.messages").build(),
+            jobs_processed: meter.u64_counter("harpe.jobs.processed").build(),
+            jobs_succeeded: meter.u64_counter("harpe.jobs.succeeded").build(),
+            jobs_retried: meter.u64_counter("harpe.jobs.retried").build(),
+            jobs_failed: meter.u64_counter("harpe.jobs.failed").build(),
+            health_checks: meter.u64_counter("harpe.health.checks").build(),
+            grpc_latency: meter
+                .f64_histogram("harpe.grpc.request.duration")
+                .with_unit("s")
+                .with_boundaries(
+                    GRPC_LATENCY_BUCKET_MS
+                        .iter()
+                        .map(|ms| *ms as f64 / 1_000.0)
+                        .collect(),
+                )
+                .build(),
+        }
+    }
+}
+
+impl AppMetrics {
+    /// Uses the same instruments as production with an injectable SDK meter.
+    pub fn with_meter(meter: Meter) -> Self {
+        Self {
+            telemetry: TelemetryMetrics::new(&meter),
             grpc_requests: AtomicU64::new(0),
             grpc_failures: AtomicU64::new(0),
             streamed_messages: AtomicU64::new(0),
@@ -49,6 +100,7 @@ impl AppMetrics {
 
     pub fn record_grpc_request(&self) {
         self.grpc_requests.fetch_add(1, Ordering::Relaxed);
+        self.telemetry.grpc_requests.add(1, &[]);
     }
 
     pub fn track_grpc_latency(&self) -> LatencyGuard<'_> {
@@ -59,6 +111,9 @@ impl AppMetrics {
     }
 
     pub fn record_grpc_latency(&self, elapsed: Duration) {
+        self.telemetry
+            .grpc_latency
+            .record(elapsed.as_secs_f64(), &[]);
         let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
         self.grpc_latency_count.fetch_add(1, Ordering::Relaxed);
         self.grpc_latency_sum_ms
@@ -72,30 +127,37 @@ impl AppMetrics {
 
     pub fn record_grpc_failure(&self) {
         self.grpc_failures.fetch_add(1, Ordering::Relaxed);
+        self.telemetry.grpc_failures.add(1, &[]);
     }
 
     pub fn record_streamed_message(&self) {
         self.streamed_messages.fetch_add(1, Ordering::Relaxed);
+        self.telemetry.streamed_messages.add(1, &[]);
     }
 
     pub fn record_job_processed(&self) {
         self.jobs_processed.fetch_add(1, Ordering::Relaxed);
+        self.telemetry.jobs_processed.add(1, &[]);
     }
 
     pub fn record_job_succeeded(&self) {
         self.jobs_succeeded.fetch_add(1, Ordering::Relaxed);
+        self.telemetry.jobs_succeeded.add(1, &[]);
     }
 
     pub fn record_job_retried(&self) {
         self.jobs_retried.fetch_add(1, Ordering::Relaxed);
+        self.telemetry.jobs_retried.add(1, &[]);
     }
 
     pub fn record_job_failed(&self) {
         self.jobs_failed.fetch_add(1, Ordering::Relaxed);
+        self.telemetry.jobs_failed.add(1, &[]);
     }
 
     pub fn record_health_check(&self) {
         self.health_checks.fetch_add(1, Ordering::Relaxed);
+        self.telemetry.health_checks.add(1, &[]);
     }
 
     pub fn snapshot(&self) -> MetricsSnapshot {
@@ -236,6 +298,71 @@ fn push_counter(lines: &mut Vec<String>, name: &str, value: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use opentelemetry::metrics::MeterProvider as _;
+    use opentelemetry_sdk::metrics::{
+        InMemoryMetricExporter, SdkMeterProvider,
+        data::{AggregatedMetrics, MetricData},
+    };
+
+    #[test]
+    fn exports_counters_and_latency_in_seconds_to_the_sdk() {
+        let exporter = InMemoryMetricExporter::default();
+        let provider = SdkMeterProvider::builder()
+            .with_periodic_exporter(exporter.clone())
+            .build();
+        let metrics = AppMetrics::with_meter(provider.meter("harpe-server"));
+        metrics.record_grpc_request();
+        metrics.record_grpc_request();
+        metrics.record_grpc_failure();
+        metrics.record_streamed_message();
+        metrics.record_job_processed();
+        metrics.record_job_succeeded();
+        metrics.record_job_retried();
+        metrics.record_job_failed();
+        metrics.record_health_check();
+        metrics.record_grpc_latency(Duration::from_millis(250));
+        metrics.record_grpc_latency(Duration::from_millis(750));
+        provider.force_flush().unwrap();
+
+        let exported = exporter.get_finished_metrics().unwrap();
+        let instruments: Vec<_> = exported
+            .iter()
+            .flat_map(|resource| resource.scope_metrics())
+            .flat_map(|scope| scope.metrics())
+            .collect();
+        assert_eq!(instruments.len(), 9);
+        for (name, expected) in [
+            ("harpe.grpc.requests", 2),
+            ("harpe.grpc.failures", 1),
+            ("harpe.streamed.messages", 1),
+            ("harpe.jobs.processed", 1),
+            ("harpe.jobs.succeeded", 1),
+            ("harpe.jobs.retried", 1),
+            ("harpe.jobs.failed", 1),
+            ("harpe.health.checks", 1),
+        ] {
+            let metric = instruments
+                .iter()
+                .find(|metric| metric.name() == name)
+                .unwrap();
+            let AggregatedMetrics::U64(MetricData::Sum(sum)) = metric.data() else {
+                panic!("{name} must be a counter");
+            };
+            assert_eq!(sum.data_points().next().unwrap().value(), expected);
+        }
+        let latency = instruments
+            .iter()
+            .find(|metric| metric.name() == "harpe.grpc.request.duration")
+            .unwrap();
+        assert_eq!(latency.unit(), "s");
+        let AggregatedMetrics::F64(MetricData::Histogram(histogram)) = latency.data() else {
+            panic!("latency must be a histogram");
+        };
+        let point = histogram.data_points().next().unwrap();
+        assert_eq!(point.count(), 2);
+        assert_eq!(point.sum(), 1.0);
+        provider.shutdown().unwrap();
+    }
 
     #[test]
     fn metrics_snapshot_reports_recorded_counts() {

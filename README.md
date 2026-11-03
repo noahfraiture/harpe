@@ -182,6 +182,54 @@ Main keys:
 - `?`: help
 - `Ctrl-Q` or `Ctrl-C`: quit
 
+## Observability
+
+The server always logs to the console. `TELEMETRY_FORMAT=pretty` is the default;
+set it to `json` for structured container logs. `RUST_LOG` controls filtering
+(default `harpe_server=info,opentelemetry=warn`).
+
+OTLP export is optional. Set `OTEL_EXPORTER_OTLP_ENDPOINT` to enable **gRPC**
+export of metrics, logs and traces together:
+
+```sh
+OTEL_SERVICE_NAME=harpe \
+OTEL_RESOURCE_ATTRIBUTES=service.namespace=harpe,k8s.namespace.name=harpe \
+OTEL_EXPORTER_OTLP_ENDPOINT=http://opentelemetry-collector.observability.svc.cluster.local:4317 \
+OTEL_METRIC_EXPORT_INTERVAL=10000 \
+TELEMETRY_FORMAT=json \
+cargo run -p harpe-server
+```
+
+Use a reachable Collector address when running outside Kubernetes. With no
+endpoint configured, the server keeps console logging and its existing gRPC
+metrics API, without running OTLP exporters. Export failures do not stop RPC
+handling. All three SDK providers are flushed during graceful shutdown.
+
+Each RPC creates a `grpc.request` server span. W3C `traceparent` and `tracestate`
+request metadata are extracted, so calls join an incoming distributed trace.
+Application log records carry their active trace/span IDs through OTLP.
+Exporter diagnostics remain console-only to avoid telemetry feedback loops.
+
+The existing counters are also recorded as OpenTelemetry instruments:
+`harpe.grpc.requests`, `harpe.grpc.failures`, `harpe.streamed.messages`,
+`harpe.jobs.processed`, `harpe.jobs.succeeded`, `harpe.jobs.retried`,
+`harpe.jobs.failed` and `harpe.health.checks`. The OTLP latency histogram
+`harpe.grpc.request.duration` uses seconds. The existing gRPC Prometheus text
+export retains its millisecond histogram for compatibility.
+
+To generate all three signals without calling an LLM:
+
+```sh
+cargo run -p harpe-cli --bin harpe -- --addr http://harpe:50051 health
+```
+
+Use `http://[::1]:50051` for a local server. A health RPC records counters and
+latency, logs `health check completed`, and emits a request trace. In Fusion,
+the Nix repository provisions the `Harpe overview` Grafana dashboard and the
+Collector path to Prometheus, Loki and Tempo. If both console logs and OTLP
+logs are collected, exclude this server's stdout from the file collector to
+avoid duplicates; keep stdout available for normal container debugging.
+
 ## Test
 
 ```sh

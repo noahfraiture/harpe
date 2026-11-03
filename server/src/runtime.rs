@@ -30,15 +30,6 @@ pub struct RuntimeParts {
     pub service: HarpeGrpc,
 }
 
-pub fn init_tracing() {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "harpe_server=info,tower_http=info".into()),
-        )
-        .try_init();
-}
-
 pub async fn build_runtime_parts(config: &AppConfig) -> Result<RuntimeParts> {
     let store = store_from_config(config).await?;
     let llm = llm_from_config(config.llm.clone())?;
@@ -172,6 +163,7 @@ pub async fn serve_grpc(
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> std::result::Result<(), tonic::transport::Error> {
     Server::builder()
+        .trace_fn(crate::telemetry::grpc_span)
         .add_service(AdminServiceServer::new(service.clone()))
         .add_service(HealthServiceServer::new(service.clone()))
         .add_service(MetricsServiceServer::new(service.clone()))
@@ -262,12 +254,6 @@ mod tests {
         );
         assert_eq!(overridden.budget.max_context_tokens, 64_000);
         assert_eq!(overridden.budget.reserved_response_tokens, 4_096);
-    }
-
-    #[test]
-    fn init_tracing_is_idempotent() {
-        init_tracing();
-        init_tracing();
     }
 
     #[tokio::test]

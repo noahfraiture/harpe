@@ -15,6 +15,12 @@ impl health_service_server::HealthService for HarpeGrpc {
         self.metrics.record_health_check();
         let service = normalize_health_service(&request.into_inner().service);
         let response = health_response(self.store.as_ref(), service).await;
+        tracing::info!(
+            rpc = "HealthService.Check",
+            status = response.status,
+            database_ok = response.database_ok,
+            "health check completed"
+        );
 
         Ok(Response::new(response))
     }
